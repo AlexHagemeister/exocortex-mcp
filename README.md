@@ -83,6 +83,20 @@ authorization server per the MCP auth spec. Not worth it for personal use today.
 The clone lives on the ephemeral filesystem and is re-cloned on each deploy —
 fine, since GitHub is the source of truth.
 
+## Monitoring
+
+`GET /healthz` is shallow liveness. `GET /healthz/deep` is the monitoring
+endpoint: it exercises the mirror sync and inspects the `inbox-drops` backlog,
+returning 503 when sync fails or captures sit undrained for >36h (two missed
+nightly consumer runs). One probe therefore catches process-down, sync-broken
+(bad PAT, GitHub unreachable), and consumer-not-running. It exposes counts and
+ages only, never vault content.
+
+[`.github/workflows/healthcheck.yml`](.github/workflows/healthcheck.yml) probes
+it every 15 minutes; GitHub emails on workflow failure. Caveats: cron runs can
+be delayed, and GitHub pauses scheduled workflows after ~60 days of repo
+inactivity (it emails first — one click keeps it alive).
+
 ## Local development
 
 ```sh
