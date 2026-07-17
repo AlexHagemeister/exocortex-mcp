@@ -2,14 +2,26 @@ import crypto from "node:crypto";
 import express, { type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { config } from "./config.js";
+import { deepHealth } from "./health.js";
 import { ensureFresh } from "./mirror.js";
 import { buildServer } from "./server.js";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
+// Shallow liveness: is the process up.
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true });
+});
+
+// Deep health for external monitoring: 503 when sync is broken or captures
+// are stuck on inbox-drops. Exposes counts/ages only, no vault content.
+app.get("/healthz/deep", (_req, res) => {
+  deepHealth()
+    .then((h) => res.status(h.ok ? 200 : 503).json(h))
+    .catch((err) =>
+      res.status(503).json({ ok: false, degraded: [String(err?.message ?? err)] })
+    );
 });
 
 function timingSafeEqual(a: string, b: string): boolean {
