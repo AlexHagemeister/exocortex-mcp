@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# Consume remote captures from the mirror's inbox-drops branch into the vault.
+# Consume remote captures from the inbox-drops branch into the vault.
 #
-# Run locally (the machine that has the vault + mirror). Intended to be invoked
-# manually or hooked into the mirror-snapshot routine, BEFORE the snapshot's
-# rsync so captures survive the --delete pass by already being in the vault.
+# Run locally (the machine that has the vault). The vault is itself a clone of
+# the private repo, so git operations run in the vault by default. Intended to
+# be invoked manually or by the vault-snapshot routine, before its commit so
+# captures ride along in the same snapshot.
 #
 #   ./scripts/consume-inbox-drops.sh
 #
-# Reads the vault root from ~/.claude/exocortex-vault-path and the mirror from
-# ~/exocortex-mirror (override with VAULT_DIR / MIRROR_DIR).
+# Reads the vault root from ~/.claude/exocortex-vault-path (override with
+# VAULT_DIR; MIRROR_DIR overrides where git commands run, defaults to the vault).
 set -euo pipefail
 
 VAULT_DIR="${VAULT_DIR:-$(cat "$HOME/.claude/exocortex-vault-path")}"
-MIRROR_DIR="${MIRROR_DIR:-$HOME/exocortex-mirror}"
+MIRROR_DIR="${MIRROR_DIR:-$VAULT_DIR}"
 BRANCH="inbox-drops"
 
 cd "$MIRROR_DIR"
