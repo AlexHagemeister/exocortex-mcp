@@ -12,14 +12,14 @@ claude.ai / Claude Code ──HTTP──▶ exocortex-mcp (Railway)
                                      │  clone + pull (read)
                                      │  push inbox-drops (write)
                                      ▼
-                        github.com/AlexHagemeister/exocortex-mirror  (private)
+                        github.com/AlexHagemeister/exocortex-vault  (private)
                                      ▲
-                                     │  nightly mirror-snapshot (rsync + commit + push)
-                              local vault (Obsidian, iCloud)
+                                     │  daily vault-snapshot (commit + pull --rebase + push)
+                              local vault (~/exocortex; Obsidian Sync for devices)
 ```
 
-- **Data source is the mirror's GitHub repo**, not the live vault. Staleness is
-  bounded by the nightly snapshot — accepted by design.
+- **Data source is the vault's GitHub repo**, not the live working copy. Staleness
+  is bounded by the daily snapshot — accepted by design.
 - The server keeps a shallow working clone under `DATA_DIR/mirror`, pulling at
   most every `SYNC_INTERVAL_SECONDS`.
 
@@ -35,20 +35,23 @@ Three tools only, preserving the vault's single-pipeline rule in infrastructure:
 
 ## The capture return path (resolved open question)
 
-`capture_to_inbox` cannot commit to the mirror's `main`: the nightly snapshot's
-`rsync --delete` would clobber server-side additions. Instead:
+Captures go through a dedicated branch, never directly to `main`:
 
-1. The server commits each capture to a dedicated **`inbox-drops`** branch
+1. The server commits each capture to the **`inbox-drops`** branch
    (based on `main`, so `origin/main...inbox-drops` is exactly the pending captures)
    and pushes it.
 2. Locally, [`scripts/consume-inbox-drops.sh`](scripts/consume-inbox-drops.sh)
    copies pending captures into the vault's `sources/inbox/` and force-resets the
-   branch to `main`. Hook it into the mirror-snapshot routine **before** the rsync,
-   or run it by hand.
+   branch to `main`. The vault-snapshot routine runs it before committing, or run
+   it by hand.
 3. From there the vault's normal ingest pipeline takes over.
 
-The alternative considered (a side store outside git) was rejected to keep one
-data path and one credential. Revisable if branch juggling proves annoying.
+The original reason for the branch (the old rsync-based snapshot would clobber
+server-side commits to `main`) died with the 2026-07-19 vault-as-repo migration.
+The branch was deliberately kept anyway (decision 2026-07-19): it keeps `main`
+single-writer from the Mac — no push races between the server and snapshots, and
+remote surfaces stay on the inbox pipeline. A side store outside git was rejected
+earlier to keep one data path and one credential.
 
 ## Auth (resolved open question)
 
@@ -69,12 +72,12 @@ authorization server per the MCP auth spec. Not worth it for personal use today.
 
 ## Deploy (Railway)
 
-1. Create a **fine-grained GitHub PAT** scoped to `AlexHagemeister/exocortex-mirror`
+1. Create a **fine-grained GitHub PAT** scoped to `AlexHagemeister/exocortex-vault`
    only, with *Contents: Read and write* (write is needed for `inbox-drops` pushes).
 2. New Railway service from this repo. Nixpacks detects Node; it runs
    `npm run build` then `npm start`.
 3. Set variables:
-   - `MIRROR_REPO_URL=https://x-access-token:<PAT>@github.com/AlexHagemeister/exocortex-mirror.git`
+   - `MIRROR_REPO_URL=https://x-access-token:<PAT>@github.com/AlexHagemeister/exocortex-vault.git`
    - `EXOCORTEX_TOKEN=<openssl rand -hex 32>`
 4. Note the public domain, then add the connector in claude.ai:
    **Settings → Connectors → Add custom connector** with
@@ -100,7 +103,7 @@ inactivity (it emails first — one click keeps it alive).
 ## Local development
 
 ```sh
-cp .env.example .env   # point MIRROR_REPO_URL at ~/exocortex-mirror, set a token
+cp .env.example .env   # point MIRROR_REPO_URL at ~/exocortex, set a token
 npm install
 npm run dev
 ```
