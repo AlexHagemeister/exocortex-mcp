@@ -1,13 +1,18 @@
 import matter from "gray-matter";
 import { ensureFresh, listMarkdown, readRepoFile } from "./mirror.js";
 
+export type SearchDetail = "concise" | "full";
+
 export interface WikiHit {
   path: string;
   title: string;
   description: string;
   status: string;
   score: number;
-  snippet: string;
+  /** Present only when the page has no description to stand in for it. */
+  snippet?: string;
+  /** Present only for detail: "full". */
+  body?: string;
 }
 
 interface WikiDoc {
@@ -99,7 +104,11 @@ function makeSnippet(doc: WikiDoc, terms: string[]): string {
   return doc.body.slice(0, 200).replace(/\s+/g, " ").trim();
 }
 
-export async function queryWiki(query: string, limit = 8): Promise<WikiHit[]> {
+export async function queryWiki(
+  query: string,
+  limit = 8,
+  detail: SearchDetail = "concise"
+): Promise<WikiHit[]> {
   const docs = await getIndex();
   const terms = query
     .toLowerCase()
@@ -120,14 +129,16 @@ export async function queryWiki(query: string, limit = 8): Promise<WikiHit[]> {
     }
     if (score === 0) continue;
     score *= STATUS_WEIGHT[doc.status] ?? DEFAULT_STATUS_WEIGHT;
-    hits.push({
+    const hit: WikiHit = {
       path: doc.path,
       title: doc.title,
       description: doc.description,
       status: doc.status || "(none)",
       score: Math.round(score * 100) / 100,
-      snippet: makeSnippet(doc, terms),
-    });
+    };
+    if (!doc.description) hit.snippet = makeSnippet(doc, terms);
+    if (detail === "full") hit.body = doc.body;
+    hits.push(hit);
   }
   hits.sort((a, b) => b.score - a.score);
   return hits.slice(0, limit);
