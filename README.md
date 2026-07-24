@@ -1,8 +1,16 @@
 # exocortex-mcp
 
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-buy%20me%20a%20coffee-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/V1N723QW1K)
+
 Remote MCP server for an [exocortex](https://github.com/AlexHagemeister/exocortex) vault — your compiled knowledge, reachable from claude.ai, the Claude mobile app, and any MCP client, wherever you are.
 
 **Companion component, not a requirement.** The vault works fully without this server. What it adds is the away-from-desk loop: query your wiki mid-conversation on your phone, and capture thoughts that land in your vault's normal ingest pipeline — the driving use case is talking to Claude while out, with your exocortex along for the ride.
+
+<p align="center">
+  <a href="https://ko-fi.com/V1N723QW1K">
+    <img src="https://storage.ko-fi.com/cdn/brandasset/v2/support_me_on_kofi_red.png" width="300" alt="Support me on Ko-fi">
+  </a>
+</p>
 
 ## What it does
 
