@@ -13,9 +13,20 @@ jobs:
     timeout-minutes: 3
     steps:
       - name: Probe deep health endpoint
+        env:
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
         run: |
+          # Set the HEALTHCHECK_URL repository secret to your deployment's
+          # /healthz/deep URL (Settings -> Secrets and variables -> Actions).
+          # A secret, not a variable: it names your live endpoint, and secrets
+          # stay masked in publicly readable run logs.
+          # Skips quietly when unset so forks don't get failure spam.
+          if [ -z "$HEALTHCHECK_URL" ]; then
+            echo "HEALTHCHECK_URL not set; skipping probe."
+            exit 0
+          fi
           # -f fails the step on any non-2xx (including the 503 degraded state),
           # which fails the run, which triggers GitHub's failure email.
           # Retries smooth over one-off network blips so alerts mean something.
           curl -fsS --retry 3 --retry-delay 10 --retry-all-errors --max-time 30 \
-            https://exocortex-mcp-production.up.railway.app/healthz/deep | tee health.json
+            "$HEALTHCHECK_URL" | tee health.json
