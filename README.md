@@ -1,6 +1,9 @@
 # exocortex-mcp
 
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-buy%20me%20a%20coffee-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/V1N723QW1K)
+[![CI](https://github.com/AlexHagemeister/exocortex-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexHagemeister/exocortex-mcp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/AlexHagemeister/exocortex-mcp?style=flat-square)](https://github.com/AlexHagemeister/exocortex-mcp/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-buy%20me%20a%20coffee-FF5E5B?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/V1N723QW1K)
 
 Remote MCP server for an [exocortex](https://github.com/AlexHagemeister/exocortex) vault — your compiled knowledge, reachable from claude.ai, the Claude mobile app, and any MCP client, wherever you are.
 
