@@ -1,6 +1,6 @@
 {
   "name": "exocortex-mcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Remote MCP server exposing the exocortex vault (via its git mirror) to Claude from anywhere.",
   "type": "module",
   "private": true,
