@@ -30,19 +30,22 @@ function timingSafeEqual(a: string, b: string): boolean {
   return crypto.timingSafeEqual(ha, hb);
 }
 
-function authorized(req: Request, pathToken?: string): boolean {
+type AuthMethod = "bearer" | "path";
+
+function authorized(req: Request, pathToken?: string): AuthMethod | null {
   const header = req.headers.authorization;
   if (header?.startsWith("Bearer ") && timingSafeEqual(header.slice(7), config.token)) {
-    return true;
+    return "bearer";
   }
   if (pathToken && timingSafeEqual(pathToken, config.token)) {
-    return true;
+    return "path";
   }
-  return false;
+  return null;
 }
 
 async function handleMcp(req: Request, res: Response, pathToken?: string) {
-  if (!authorized(req, pathToken)) {
+  const authMethod = authorized(req, pathToken);
+  if (!authMethod) {
     res.status(401).json({
       jsonrpc: "2.0",
       error: { code: -32001, message: "Unauthorized" },
@@ -53,12 +56,13 @@ async function handleMcp(req: Request, res: Response, pathToken?: string) {
   // Stateless mode: a fresh server + transport per request, no session ids.
   // Any request can hit any instance; nothing is held between calls.
   // Client identity: the MCP initialize handshake's clientInfo never reaches a
-  // stateless tool call, but the auth route already distinguishes the surface
-  // (path auth is only used by the claude.ai connector) and the User-Agent
-  // fills in the rest. Stamped into capture frontmatter as `captured_via`.
+  // stateless tool call, but the auth method that actually authorized this
+  // request distinguishes the surface (path auth is only used by the claude.ai
+  // connector) and the User-Agent fills in the rest. Stamped into capture
+  // frontmatter as `captured_via`.
   const ua = req.get("user-agent");
   const clientHint =
-    (pathToken ? "claude.ai connector" : "bearer-auth client") +
+    (authMethod === "path" ? "claude.ai connector" : "bearer-auth client") +
     (ua ? `, ${ua}` : "");
   const server = buildServer(clientHint);
   const transport = new StreamableHTTPServerTransport({

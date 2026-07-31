@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import matter from "gray-matter";
 import { z } from "zod";
@@ -50,9 +51,13 @@ function extractSection(body: string, section: string): string | null {
  * wiki, and capture_to_inbox as the sole write — knowledge enters the wiki
  * only through sources/inbox/ (the single-pipeline rule).
  */
+const { version } = createRequire(import.meta.url)("../package.json") as {
+  version: string;
+};
+
 export function buildServer(clientHint?: string): McpServer {
   const server = new McpServer(
-    { name: "exocortex", version: "0.1.0" },
+    { name: "exocortex", version },
     {
       instructions:
         "Capture contract — binds every capture_to_inbox call. A capture is a frozen record " +
@@ -222,6 +227,8 @@ export function buildServer(clientHint?: string): McpServer {
           .describe("Source type, e.g. 'Capture' (default), 'Correction', 'Idea'"),
         provenance: z
           .string()
+          .trim()
+          .min(1, "provenance is required: who spoke, when, on which surface")
           .describe(
             "Who spoke, when, on which surface — e.g. 'the user, 2026-07-17, in conversation " +
               "(Claude mobile app)'. If the capture mixes the user's speech with your own " +
