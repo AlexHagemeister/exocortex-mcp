@@ -52,7 +52,15 @@ async function handleMcp(req: Request, res: Response, pathToken?: string) {
   }
   // Stateless mode: a fresh server + transport per request, no session ids.
   // Any request can hit any instance; nothing is held between calls.
-  const server = buildServer();
+  // Client identity: the MCP initialize handshake's clientInfo never reaches a
+  // stateless tool call, but the auth route already distinguishes the surface
+  // (path auth is only used by the claude.ai connector) and the User-Agent
+  // fills in the rest. Stamped into capture frontmatter as `captured_via`.
+  const ua = req.get("user-agent");
+  const clientHint =
+    (pathToken ? "claude.ai connector" : "bearer-auth client") +
+    (ua ? `, ${ua}` : "");
+  const server = buildServer(clientHint);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
   });

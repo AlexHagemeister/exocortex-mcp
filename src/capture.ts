@@ -10,6 +10,8 @@ export interface CaptureInput {
   description?: string;
   type?: string;
   provenance?: string;
+  /** Server-derived client identity (auth route + user agent) — never agent-supplied. */
+  client?: string;
 }
 
 function slugify(title: string): string {
@@ -78,6 +80,12 @@ async function doCapture(input: CaptureInput): Promise<string> {
       `timestamp: ${now.toISOString()}`,
       `provenance: ${yamlEscape(
         input.provenance ?? `remote capture via exocortex-mcp, ${date}`
+      )}`,
+      // Mechanical surface identity, stamped server-side so it never depends
+      // on the calling agent's diligence. Ingest reads it as "which surface
+      // wrote this file", complementing provenance's "who spoke".
+      `captured_via: ${yamlEscape(
+        input.client ? `exocortex-mcp (${input.client})` : "exocortex-mcp"
       )}`,
       "---",
       "",

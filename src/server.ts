@@ -50,8 +50,25 @@ function extractSection(body: string, section: string): string | null {
  * wiki, and capture_to_inbox as the sole write — knowledge enters the wiki
  * only through sources/inbox/ (the single-pipeline rule).
  */
-export function buildServer(): McpServer {
-  const server = new McpServer({ name: "exocortex", version: "0.1.0" });
+export function buildServer(clientHint?: string): McpServer {
+  const server = new McpServer(
+    { name: "exocortex", version: "0.1.0" },
+    {
+      instructions:
+        "Capture contract — binds every capture_to_inbox call. A capture is a frozen record " +
+        "of what was said, consumed by a pipeline that trusts its attribution, so: " +
+        "(1) Put the user's exact words in marked quotes with a speaker (e.g. `the user, verbatim: \"...\"`). " +
+        "Unmarked text is treated downstream as your paraphrase and can never be promoted to " +
+        "verified truth — unquoted user speech is information lost at capture time. " +
+        "(2) Never file your own material under the user's name. Research you performed, background " +
+        "you supplied, and conclusions you drew go in a separate section attributed to you " +
+        "(e.g. `## Agent research` / `## Agent conclusions`), with URLs for anything looked up. " +
+        "A capture whose provenance says only 'the user' must contain only what the user said. " +
+        "(3) Name each claim's speaker so attribution is recoverable per claim, not just per file. " +
+        "(4) Never write a guess or interpretation with the typography of fact — mark inference " +
+        "as inference, and when part of a capture is uncertain, say which part.",
+    }
+  );
 
   server.registerTool(
     "query_wiki",
@@ -188,7 +205,10 @@ export function buildServer(): McpServer {
         "mirror's inbox-drops branch); the vault's ingest pipeline files it from there. Use for " +
         "anything worth keeping: decisions, ideas, corrections, things the user says to remember. " +
         "Corrections to existing wiki content also go here — never described as edits, always as " +
-        "new statements with provenance.",
+        "new statements with provenance. Write the capture to survive audit (the server " +
+        "instructions carry the full contract): the user's exact words as marked quotes with a " +
+        "speaker; your own research or conclusions in a separate section attributed to you, with " +
+        "URLs; inference marked as inference, never written as fact.",
       inputSchema: {
         title: z.string().describe("Short title for the capture"),
         content: z.string().describe("Markdown body of the capture"),
@@ -202,12 +222,16 @@ export function buildServer(): McpServer {
           .describe("Source type, e.g. 'Capture' (default), 'Correction', 'Idea'"),
         provenance: z
           .string()
-          .optional()
-          .describe("Where this came from, e.g. 'the user, 2026-07-17, via phone'"),
+          .describe(
+            "Who spoke, when, on which surface — e.g. 'the user, 2026-07-17, in conversation " +
+              "(Claude mobile app)'. If the capture mixes the user's speech with your own " +
+              "research or conclusions, say so here (e.g. 'the user + agent research, …') and " +
+              "keep the two separated in the body."
+          ),
       },
     },
     async (input) => {
-      const relPath = await captureToInbox(input);
+      const relPath = await captureToInbox({ ...input, client: clientHint });
       return {
         content: [
           {
