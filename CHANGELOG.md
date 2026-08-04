@@ -2,6 +2,11 @@
 
 Notable changes to exocortex-mcp, per release. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) — pre-1.0, a minor bump means new capability, a patch means fixes and wording. Companion to the [exocortex program](https://github.com/AlexHagemeister/exocortex), which versions independently.
 
+## [Unreleased]
+
+### Fixed
+- `consume-inbox-drops.sh` destroyed captures whose filenames contain non-ASCII characters. `git diff --name-only` C-quotes such paths by default, so a capture titled with an umlaut was read as a quoted string carrying literal backslash escapes: the script created a directory named `"sources` at the vault root, wrote a 0-byte file into it, then died mid-loop when `git show` could not find the quoted path in the tree — before reaching any remaining captures, and without printing a halt line that monitoring would recognize. On the next run the 0-byte file satisfied the already-exists guard, so the failure reported itself as an idempotent success; once every capture had "consumed" this way, the loop completed and force-reset `inbox-drops` to `main`, destroying the only remote copy. Three changes, each closing one link in that chain: the work list is NUL-delimited with `core.quotepath=false`; each capture is staged to a temp file and moved into place only after `git show` succeeds, so a failure leaves nothing behind to poison the guard; and the branch reset is skipped whenever any capture failed, so a bug can never delete a capture it could not read.
+
 ## [0.5.0] — 2026-07-31
 
 ### Added
