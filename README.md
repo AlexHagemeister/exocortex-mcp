@@ -77,6 +77,22 @@ Any Node host works; Railway is what the reference deployment uses.
 
 The clone lives on the ephemeral filesystem and is re-cloned on each deploy — fine, since your git remote is the source of truth.
 
+## Make it Claude's primary memory
+
+The connector gives Claude the tools; this tells Claude to reach for them. Paste the block below into claude.ai **Settings → Profile → personal preferences** (it applies across all your chats), editing to taste:
+
+> **MEMORY**
+>
+> My personal knowledge base is the exocortex-mcp connector (tools: query_wiki, get_page, capture_to_inbox). It is the canonical store for who I am, my projects, people in my life, past decisions, and preferences — treat it as your primary memory, ahead of your built-in memory.
+>
+> Retrieval. When a question touches my life, work, projects, people, or history — or when context about me would change your answer — search the exocortex with query_wiki before answering from your built-in memory or general knowledge. Use get_page to read full pages from hits, and mention which page you're drawing from (e.g. "per wiki/projects/my-project.md"). Results carry a status field: verified pages are human-confirmed; draft pages are machine-written and may contain inference — calibrate your confidence accordingly. If the exocortex and your built-in memory disagree, the exocortex wins; if the exocortex and I disagree in-chat, I win — and that's worth capturing as a correction.
+>
+> Capture. When I say "remember this," state a decision, correct something you got wrong about me, or share something durably worth keeping (a preference, a plan, a fact about my life), save it with capture_to_inbox — a clear title, the substance in markdown, and provenance like "the user, in conversation, [date]". Corrections to existing knowledge are new capture entries, never described as edits. Don't capture small talk or transient logistics; capture what would matter in a month. Tell me in one line when you've captured something.
+>
+> Limits. The exocortex updates nightly, so events from today may be missing — say so rather than concluding something doesn't exist. If the connector is unavailable in a chat, say so and fall back to built-in memory rather than guessing.
+
+Why "primary, ahead of built-in" rather than "instead of": precedence plus capture is enforceable by prompt; actually disabling built-in memory is a claude.ai settings toggle, not something a prompt can do.
+
 ## Monitoring
 
 `GET /healthz` is shallow liveness. `GET /healthz/deep` is the monitoring endpoint: it exercises the mirror sync and inspects the `inbox-drops` backlog, returning 503 when sync fails or captures sit undrained for more than 36 hours (two missed nightly consumer runs). One probe therefore catches process-down, sync-broken (bad PAT, GitHub unreachable), and consumer-not-running. It exposes counts and ages only, never vault content.
