@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { config } from "./config.js";
 import { deepHealth } from "./health.js";
 import { ensureFresh } from "./mirror.js";
+import { redact } from "./redact.js";
 import { buildServer } from "./server.js";
 
 const app = express();
@@ -20,7 +21,7 @@ app.get("/healthz/deep", (_req, res) => {
   deepHealth()
     .then((h) => res.status(h.ok ? 200 : 503).json(h))
     .catch((err) =>
-      res.status(503).json({ ok: false, degraded: [String(err?.message ?? err)] })
+      res.status(503).json({ ok: false, degraded: [redact(String(err?.message ?? err))] })
     );
 });
 
@@ -100,6 +101,6 @@ app.listen(config.port, () => {
   console.log(`exocortex-mcp listening on :${config.port}`);
   // Warm the mirror clone in the background so the first tool call is fast.
   ensureFresh().catch((err) =>
-    console.error("initial mirror sync failed:", err.message ?? err)
+    console.error("initial mirror sync failed:", redact(String(err.message ?? err)))
   );
 });
