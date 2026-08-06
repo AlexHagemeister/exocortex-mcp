@@ -3,16 +3,24 @@ import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { config, MIRROR_DIR } from "./config.js";
+import { redactError } from "./redact.js";
 
 const run = promisify(execFile);
 
+// A failed execFile puts the full command line — which can include the PAT
+// from MIRROR_REPO_URL — into err.message. Scrub before rethrowing so no
+// caller can leak it (issue #6).
 export async function git(args: string[], cwd?: string): Promise<string> {
-  const { stdout } = await run("git", args, {
-    cwd,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-    maxBuffer: 32 * 1024 * 1024,
-  });
-  return stdout.trim();
+  try {
+    const { stdout } = await run("git", args, {
+      cwd,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    return stdout.trim();
+  } catch (err) {
+    throw redactError(err);
+  }
 }
 
 let lastSync = 0;

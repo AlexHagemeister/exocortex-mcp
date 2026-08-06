@@ -1,5 +1,6 @@
 import { INBOX_BRANCH, MIRROR_DIR } from "./config.js";
 import { ensureFresh, git } from "./mirror.js";
+import { redact } from "./redact.js";
 
 export interface DeepHealth {
   ok: boolean;
@@ -27,7 +28,7 @@ export async function deepHealth(): Promise<DeepHealth> {
     await ensureFresh();
   } catch (err) {
     syncOk = false;
-    degraded.push(`mirror sync failed: ${(err as Error).message}`);
+    degraded.push(`mirror sync failed: ${redact((err as Error).message)}`);
   }
 
   let pendingCaptures = 0;

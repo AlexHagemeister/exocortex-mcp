@@ -2,6 +2,11 @@
 
 Notable changes to exocortex-mcp, per release. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) — pre-1.0, a minor bump means new capability, a patch means fixes and wording. Companion to the [exocortex program](https://github.com/AlexHagemeister/exocortex), which versions independently.
 
+## [Unreleased]
+
+### Security
+- `/healthz/deep` could return the GitHub PAT from `MIRROR_REPO_URL` in plaintext to unauthenticated callers (#6). A failed `execFile` puts the full git command line — PAT included — into `err.message`, which `deepHealth()` served verbatim in `degraded[]` and the startup sync logged via `console.error`. Any git failure triggered it: mis-pasted URL, expired PAT, GitHub outage, DNS failure. Credentials are now scrubbed at the source — the `git()` wrapper redacts URL userinfo and GitHub token literals from `message`/`stdout`/`stderr` before rethrowing — and again at the two response boundaries and the startup log as defense in depth. Covered by the repo's first unit tests, which CI now runs.
+
 ## [0.5.1] — 2026-08-04
 
 ### Fixed
