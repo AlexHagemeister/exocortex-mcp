@@ -82,7 +82,7 @@ async function doCapture(input: CaptureInput): Promise<string> {
 
     const frontmatter = [
       "---",
-      `type: ${input.type ?? "Capture"}`,
+      `type: ${yamlEscape(input.type ?? "Capture")}`,
       `title: ${yamlEscape(input.title)}`,
       `description: ${yamlEscape(input.description ?? "")}`,
       `timestamp: ${now.toISOString()}`,
