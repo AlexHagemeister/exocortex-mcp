@@ -12,6 +12,8 @@ export interface CaptureInput {
   provenance?: string;
   /** Server-derived client identity (auth route + user agent) — never agent-supplied. */
   client?: string;
+  /** Prepended to the filename slug (e.g. "guest-note-") so guest drops are distinguishable at a glance. */
+  filenamePrefix?: string;
 }
 
 function slugify(title: string): string {
@@ -24,8 +26,13 @@ function slugify(title: string): string {
   );
 }
 
-function yamlEscape(s: string): string {
-  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+/** Exported for tests. Newlines fold to \n — an embedded line break in a
+ * double-quoted scalar would otherwise produce frontmatter no parser reads. */
+export function yamlEscape(s: string): string {
+  return `"${s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r?\n|\r/g, "\\n")}"`;
 }
 
 // Captures are committed to the dedicated inbox-drops branch, never to main.
@@ -63,11 +70,12 @@ async function doCapture(input: CaptureInput): Promise<string> {
     const inboxDir = path.join(worktree, "sources", "inbox");
     await fs.mkdir(inboxDir, { recursive: true });
 
-    let filename = `${date}-${slug}.md`;
+    const prefix = input.filenamePrefix ?? "";
+    let filename = `${date}-${prefix}${slug}.md`;
     try {
       await fs.access(path.join(inboxDir, filename));
       const hms = now.toISOString().slice(11, 19).replace(/:/g, "");
-      filename = `${date}-${hms}-${slug}.md`;
+      filename = `${date}-${hms}-${prefix}${slug}.md`;
     } catch {
       // no collision
     }

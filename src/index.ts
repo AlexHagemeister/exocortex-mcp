@@ -5,7 +5,7 @@ import { config } from "./config.js";
 import { deepHealth } from "./health.js";
 import { ensureFresh } from "./mirror.js";
 import { redact } from "./redact.js";
-import { buildServer } from "./server.js";
+import { buildServer, type Role } from "./server.js";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -33,20 +33,36 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 type AuthMethod = "bearer" | "path";
 
-function authorized(req: Request, pathToken?: string): AuthMethod | null {
-  const header = req.headers.authorization;
-  if (header?.startsWith("Bearer ") && timingSafeEqual(header.slice(7), config.token)) {
-    return "bearer";
+interface Auth {
+  role: Role;
+  method: AuthMethod;
+}
+
+/** Match a presented token against the owner secret, then the guest secret. */
+function matchToken(presented: string): Role | null {
+  if (timingSafeEqual(presented, config.token)) return "owner";
+  if (config.guestToken && timingSafeEqual(presented, config.guestToken)) {
+    return "guest";
   }
-  if (pathToken && timingSafeEqual(pathToken, config.token)) {
-    return "path";
+  return null;
+}
+
+function authorized(req: Request, pathToken?: string): Auth | null {
+  const header = req.headers.authorization;
+  if (header?.startsWith("Bearer ")) {
+    const role = matchToken(header.slice(7));
+    if (role) return { role, method: "bearer" };
+  }
+  if (pathToken) {
+    const role = matchToken(pathToken);
+    if (role) return { role, method: "path" };
   }
   return null;
 }
 
 async function handleMcp(req: Request, res: Response, pathToken?: string) {
-  const authMethod = authorized(req, pathToken);
-  if (!authMethod) {
+  const auth = authorized(req, pathToken);
+  if (!auth) {
     res.status(401).json({
       jsonrpc: "2.0",
       error: { code: -32001, message: "Unauthorized" },
@@ -63,9 +79,10 @@ async function handleMcp(req: Request, res: Response, pathToken?: string) {
   // frontmatter as `captured_via`.
   const ua = req.get("user-agent");
   const clientHint =
-    (authMethod === "path" ? "claude.ai connector" : "bearer-auth client") +
+    (auth.method === "path" ? "claude.ai connector" : "bearer-auth client") +
+    (auth.role === "guest" ? ", guest tier" : "") +
     (ua ? `, ${ua}` : "");
-  const server = buildServer(clientHint);
+  const server = buildServer(auth.role, clientHint);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
   });

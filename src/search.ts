@@ -107,7 +107,11 @@ function makeSnippet(doc: WikiDoc, terms: string[]): string {
 export async function queryWiki(
   query: string,
   limit = 8,
-  detail: SearchDetail = "concise"
+  detail: SearchDetail = "concise",
+  /** Return true to hide a page from results — evaluated before scoring, so
+   * excluded pages never surface as snippets, descriptions, or bodies. The
+   * guest tier passes its path guard here so search and reads agree exactly. */
+  exclude?: (path: string) => boolean
 ): Promise<WikiHit[]> {
   const docs = await getIndex();
   const terms = query
@@ -119,6 +123,7 @@ export async function queryWiki(
 
   const hits: WikiHit[] = [];
   for (const doc of docs) {
+    if (exclude?.(doc.path)) continue;
     let score = 0;
     for (const term of terms) {
       if (doc.title.toLowerCase().includes(term)) score += 4;

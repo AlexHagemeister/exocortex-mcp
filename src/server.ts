@@ -1,10 +1,27 @@
 import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import matter from "gray-matter";
 import { z } from "zod";
 import { captureToInbox } from "./capture.js";
-import { ensureFresh, listDir, readRepoFile, statRepoPath } from "./mirror.js";
-import { queryWiki } from "./search.js";
+import { config } from "./config.js";
+import {
+  DEFAULT_GUEST_DENY,
+  guestProvenance,
+  guestWikiPath,
+  ownerNameSlug,
+  ownerToolSlug,
+} from "./guest.js";
+import {
+  ensureFresh,
+  listDir,
+  readRepoFile,
+  realRelPath,
+  statRepoPath,
+} from "./mirror.js";
+import { queryWiki, type WikiHit } from "./search.js";
+
+export type Role = "owner" | "guest";
 
 interface Heading {
   level: number;
@@ -46,16 +63,121 @@ function extractSection(body: string, section: string): string | null {
   return lines.slice(start, end).join("\n").trim();
 }
 
+function formatHits(query: string, hits: WikiHit[]): string {
+  if (hits.length === 0) return `No wiki pages matched "${query}".`;
+  return hits
+    .map(
+      (h) =>
+        `## ${h.title}\n` +
+        `path: ${h.path} · status: ${h.status} · score: ${h.score}\n` +
+        (h.description ? `${h.description}` : `> ${h.snippet}`) +
+        (h.body ? `\n\n${h.body}` : "")
+    )
+    .join("\n\n");
+}
+
+/**
+ * The get_page handler body, shared by the owner and guest tools. The guest
+ * tool authorizes the path before calling and passes filterEntry so directory
+ * listings omit entries outside the guest scope.
+ */
+async function getPage(
+  relPath: string,
+  mode: "full" | "frontmatter" | undefined,
+  section: string | undefined,
+  filterEntry?: (childRelPath: string) => boolean
+): Promise<CallToolResult> {
+  await ensureFresh();
+  if (mode === "frontmatter" && section !== undefined) {
+    return {
+      content: [
+        { type: "text", text: "Pass either mode: 'frontmatter' or section, not both." },
+      ],
+      isError: true,
+    };
+  }
+  const kind = await statRepoPath(relPath);
+  if (kind === "missing") {
+    return {
+      content: [{ type: "text", text: `Not found: ${relPath}` }],
+      isError: true,
+    };
+  }
+  if (kind === "dir") {
+    let entries = await listDir(relPath);
+    if (filterEntry) {
+      entries = entries.filter((e) =>
+        filterEntry(`${relPath}/${e.replace(/\/$/, "")}`)
+      );
+    }
+    return {
+      content: [
+        { type: "text", text: `Directory ${relPath}:\n${entries.join("\n")}` },
+      ],
+    };
+  }
+  const content = await readRepoFile(relPath);
+  if (mode === "frontmatter") {
+    // Textual extraction: gray-matter's `.matter` property is dropped from
+    // its parse cache, so it is unreliable once search has parsed the page.
+    const m = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(content);
+    return {
+      content: [
+        { type: "text", text: m ? m[1].trim() : `No frontmatter in ${relPath}.` },
+      ],
+    };
+  }
+  if (section !== undefined) {
+    let body = content;
+    try {
+      body = matter(content).content;
+    } catch {
+      // treat the whole file as body
+    }
+    const slice = extractSection(body, section);
+    if (slice === null) {
+      const available = listHeadings(body.split("\n"))
+        .map((h) => h.text)
+        .join(", ");
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `No section "${section}" in ${relPath}.` +
+              (available ? ` Sections: ${available}` : " The page has no headings."),
+          },
+        ],
+        isError: true,
+      };
+    }
+    return { content: [{ type: "text", text: slice }] };
+  }
+  return { content: [{ type: "text", text: content }] };
+}
+
+const { version } = createRequire(import.meta.url)("../package.json") as {
+  version: string;
+};
+
+/**
+ * One deployment, two faces: the token a connection authenticated with picks
+ * which manifest it sees. The owner gets the full three-tool server; a guest
+ * gets a read-only view of wiki/ plus a note drop, described in the third
+ * person for an agent that has never heard of this vault.
+ */
+export function buildServer(role: Role, clientHint?: string): McpServer {
+  return role === "guest"
+    ? buildGuestServer(clientHint)
+    : buildOwnerServer(clientHint);
+}
+
 /**
  * Three tools only, mirroring the vault's own contract: two reads over the
  * wiki, and capture_to_inbox as the sole write — knowledge enters the wiki
  * only through sources/inbox/ (the single-pipeline rule).
  */
-const { version } = createRequire(import.meta.url)("../package.json") as {
-  version: string;
-};
-
-export function buildServer(clientHint?: string): McpServer {
+function buildOwnerServer(clientHint?: string): McpServer {
   const server = new McpServer(
     { name: "exocortex", version },
     {
@@ -97,19 +219,7 @@ export function buildServer(clientHint?: string): McpServer {
     },
     async ({ query, limit, detail }) => {
       const hits = await queryWiki(query, limit ?? 8, detail ?? "concise");
-      if (hits.length === 0) {
-        return { content: [{ type: "text", text: `No wiki pages matched "${query}".` }] };
-      }
-      const text = hits
-        .map(
-          (h) =>
-            `## ${h.title}\n` +
-            `path: ${h.path} · status: ${h.status} · score: ${h.score}\n` +
-            (h.description ? `${h.description}` : `> ${h.snippet}`) +
-            (h.body ? `\n\n${h.body}` : "")
-        )
-        .join("\n\n");
-      return { content: [{ type: "text", text }] };
+      return { content: [{ type: "text", text: formatHits(query, hits) }] };
     }
   );
 
@@ -135,70 +245,7 @@ export function buildServer(clientHint?: string): McpServer {
           .describe("Return only the named section (heading text, case-insensitive)"),
       },
     },
-    async ({ path: relPath, mode, section }) => {
-      await ensureFresh();
-      if (mode === "frontmatter" && section !== undefined) {
-        return {
-          content: [
-            { type: "text", text: "Pass either mode: 'frontmatter' or section, not both." },
-          ],
-          isError: true,
-        };
-      }
-      const kind = await statRepoPath(relPath);
-      if (kind === "missing") {
-        return {
-          content: [{ type: "text", text: `Not found: ${relPath}` }],
-          isError: true,
-        };
-      }
-      if (kind === "dir") {
-        const entries = await listDir(relPath);
-        return {
-          content: [
-            { type: "text", text: `Directory ${relPath}:\n${entries.join("\n")}` },
-          ],
-        };
-      }
-      const content = await readRepoFile(relPath);
-      if (mode === "frontmatter") {
-        // Textual extraction: gray-matter's `.matter` property is dropped from
-        // its parse cache, so it is unreliable once search has parsed the page.
-        const m = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(content);
-        return {
-          content: [
-            { type: "text", text: m ? m[1].trim() : `No frontmatter in ${relPath}.` },
-          ],
-        };
-      }
-      if (section !== undefined) {
-        let body = content;
-        try {
-          body = matter(content).content;
-        } catch {
-          // treat the whole file as body
-        }
-        const slice = extractSection(body, section);
-        if (slice === null) {
-          const available = listHeadings(body.split("\n"))
-            .map((h) => h.text)
-            .join(", ");
-          return {
-            content: [
-              {
-                type: "text",
-                text:
-                  `No section "${section}" in ${relPath}.` +
-                  (available ? ` Sections: ${available}` : " The page has no headings."),
-              },
-            ],
-            isError: true,
-          };
-        }
-        return { content: [{ type: "text", text: slice }] };
-      }
-      return { content: [{ type: "text", text: content }] };
-    }
+    async ({ path: relPath, mode, section }) => getPage(relPath, mode, section)
   );
 
   server.registerTool(
@@ -246,6 +293,167 @@ export function buildServer(clientHint?: string): McpServer {
             text:
               `Captured to ${relPath} on the '${"inbox-drops"}' branch of the mirror. ` +
               `It will land in the vault when the local consumer runs.`,
+          },
+        ],
+      };
+    }
+  );
+
+  return server;
+}
+
+/**
+ * The guest face: what a trusted friend's Claude sees. Reads are scoped to
+ * wiki/ (minus the day logs and any configured deny list); the only write is
+ * a note drop whose provenance the server composes itself. Every tool
+ * requires `from` so the query log and the inbox both say who, not "guest".
+ */
+function buildGuestServer(clientHint?: string): McpServer {
+  const owner = config.ownerName;
+  const deny = [...DEFAULT_GUEST_DENY, ...config.guestDeny];
+  const noteTool = `leave_note_for_${ownerToolSlug(owner)}`;
+  const fromField = z
+    .string()
+    .trim()
+    .min(1, "from is required: the name of the person you are assisting")
+    .describe(
+      `The name of the person you are assisting (e.g. 'Anna'), so ${owner} ` +
+        "can see who asked. Use their real name, never a placeholder."
+    );
+  // Whitespace (incl. newlines) folds to single spaces: these lines are the
+  // query log, and agent-supplied text must not be able to forge entries.
+  const log = (from: string, line: string) =>
+    console.log(
+      `[guest] ${from.replace(/\s+/g, " ")}: ${line.replace(/\s+/g, " ")}`
+    );
+  const outOfScope = (relPath: string): CallToolResult => ({
+    content: [
+      {
+        type: "text",
+        text: `Guest access covers pages under wiki/ only; '${relPath}' is out of scope.`,
+      },
+    ],
+    isError: true,
+  });
+
+  const server = new McpServer(
+    { name: `${ownerNameSlug(owner)}-exocortex`, version },
+    {
+      instructions:
+        `You are connected to ${owner}'s exocortex as a guest. This is ${owner}'s personal ` +
+        `knowledge base: a wiki compiled by ${owner}'s own agent from ${owner}'s notes and ` +
+        `sources. Ground rules: ` +
+        `(1) Pages are a compiled record of ${owner}'s thinking, not ${owner} speaking. Each ` +
+        `page carries a status: 'verified' pages are human-confirmed; 'draft' pages are ` +
+        `machine-written and may contain inference or errors, and most pages are drafts by ` +
+        `design. Rarer statuses: treat 'stale' as possibly outdated and 'disputed' as ` +
+        `unreliable, and on pages flagged pending_review, weight any "Unreviewed additions" ` +
+        `sections as draft even though the rest is verified. Attribute what you relay ` +
+        `("${owner}'s notes say ...") and mention draft status when it materially affects ` +
+        `an answer. ` +
+        `(2) Always identify your user. Every tool takes a 'from' field: fill it with the ` +
+        `actual name of the person you are assisting, so ${owner} can see who asked what ` +
+        `and who left which note. ` +
+        `(3) ${noteTool} drops a note into ${owner}'s review inbox, attributed to your user. ` +
+        `Use it when your user wants to tell ${owner} something, or to correct something ` +
+        `these pages say about them. Nothing you write changes the wiki directly. ` +
+        `(4) Content syncs roughly nightly; very recent events may be missing. Say so ` +
+        `rather than concluding something did not happen.`,
+    }
+  );
+
+  server.registerTool(
+    "query_wiki",
+    {
+      title: `Search ${owner}'s exocortex`,
+      description:
+        `Search ${owner}'s wiki (concepts, projects, people, life). Results are ranked with ` +
+        "human-confirmed 'verified' pages above machine-written 'draft' pages. Hits are " +
+        "summaries (title, description, path, status); use get_page to read a full page.",
+      inputSchema: {
+        from: fromField,
+        query: z.string().describe("Search terms, e.g. 'current projects'"),
+        limit: z.number().int().min(1).max(25).optional().describe("Max results (default 8)"),
+      },
+    },
+    async ({ from, query, limit }) => {
+      log(from, `query_wiki "${query}"`);
+      const hits = await queryWiki(
+        query,
+        limit ?? 8,
+        "concise",
+        (p) => guestWikiPath(p, deny) === null
+      );
+      return { content: [{ type: "text", text: formatHits(query, hits) }] };
+    }
+  );
+
+  server.registerTool(
+    "get_page",
+    {
+      title: `Read a page from ${owner}'s exocortex`,
+      description:
+        `Read one of ${owner}'s wiki pages by path (e.g. 'wiki/projects/kairoscope.md'), or ` +
+        "pass a directory like 'wiki' to list what exists. Guest access covers wiki/ only. " +
+        "When you only need part of a long page, section: '<heading>' returns just that section.",
+      inputSchema: {
+        from: fromField,
+        path: z.string().describe("Repo-relative path under wiki/, or a directory to list"),
+        section: z
+          .string()
+          .optional()
+          .describe("Return only the named section (heading text, case-insensitive)"),
+      },
+    },
+    async ({ from, path: relPath, section }) => {
+      const norm = guestWikiPath(relPath, deny);
+      if (norm === null) return outOfScope(relPath);
+      // The guard is lexical; a symlink committed under wiki/ could resolve
+      // elsewhere. Re-check the real on-disk path against the same guard.
+      await ensureFresh();
+      const real = await realRelPath(norm);
+      if (real === null || guestWikiPath(real, deny) === null) {
+        return outOfScope(relPath);
+      }
+      log(from, `get_page ${norm}${section ? ` § ${section}` : ""}`);
+      return getPage(norm, undefined, section, (child) => guestWikiPath(child, deny) !== null);
+    }
+  );
+
+  server.registerTool(
+    noteTool,
+    {
+      title: `Leave ${owner} a note`,
+      description:
+        `Drop a note into ${owner}'s review inbox, attributed to your user. Use it when your ` +
+        `user wants to tell ${owner} something, ask ${owner} a question, or correct something ` +
+        `the wiki says about them. ${owner} reviews notes later; nothing is published or ` +
+        "changed directly. Quote your user's exact words where the wording matters.",
+      inputSchema: {
+        from: fromField,
+        title: z.string().describe("Short title for the note"),
+        note: z.string().describe("Markdown body of the note"),
+      },
+    },
+    async ({ from, title, note }) => {
+      log(from, `${noteTool} "${title}"`);
+      const date = new Date().toISOString().slice(0, 10);
+      await captureToInbox({
+        title,
+        content: note,
+        type: "Guest note",
+        description: `Note from ${from} via the guest connector`,
+        provenance: guestProvenance(from, date),
+        client: clientHint,
+        filenamePrefix: "guest-note-",
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Saved to ${owner}'s review inbox as a note from ${from}. ` +
+              `${owner} will see it on the next inbox pass.`,
           },
         ],
       };
