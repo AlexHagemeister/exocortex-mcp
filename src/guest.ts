@@ -31,11 +31,20 @@ export function guestWikiPath(
     .replace(/^\/+/, "")
     .replace(/\/+$/, "");
   if (norm === "" || norm === ".") return null;
-  if (norm.split("/").some((seg) => seg === "..")) return null;
-  if (norm !== "wiki" && !norm.startsWith("wiki/")) return null;
+  // Reject traversal and dot-prefixed segments (.DS_Store, .obsidian, …) —
+  // listings already hide dotfiles, so direct reads must refuse them too.
+  if (norm.split("/").some((seg) => seg === ".." || seg.startsWith("."))) {
+    return null;
+  }
+  // All checks are case-folded: the mirror may sit on a case-insensitive
+  // filesystem (macOS), where 'wiki/LOG/x.md' resolves to the denied file
+  // even though a case-sensitive compare would let it through.
+  const lower = norm.toLowerCase();
+  if (lower !== "wiki" && !lower.startsWith("wiki/")) return null;
   for (const d of deny) {
-    const prefix = d.replace(/\/+$/, "");
-    if (norm === prefix || norm.startsWith(prefix + "/")) return null;
+    const prefix = d.replace(/\/+$/, "").toLowerCase();
+    if (!prefix) continue;
+    if (lower === prefix || lower.startsWith(prefix + "/")) return null;
   }
   return norm;
 }
@@ -46,7 +55,9 @@ export function guestWikiPath(
  * string, so a note masquerading as the owner is structurally impossible.
  */
 export function guestProvenance(from: string, isoDate: string): string {
-  return `${from}, via their Claude (guest connector), ${isoDate}`;
+  // The guest marker leads so a name like "the user" or the owner's own name
+  // can never make the line *start* like an owner provenance string.
+  return `guest connector: ${from} (via their Claude), ${isoDate}`;
 }
 
 /** "Alex H." -> "alex-h", for the guest-facing server name. */

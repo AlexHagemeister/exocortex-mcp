@@ -12,7 +12,13 @@ import {
   ownerNameSlug,
   ownerToolSlug,
 } from "./guest.js";
-import { ensureFresh, listDir, readRepoFile, statRepoPath } from "./mirror.js";
+import {
+  ensureFresh,
+  listDir,
+  readRepoFile,
+  realRelPath,
+  statRepoPath,
+} from "./mirror.js";
 import { queryWiki, type WikiHit } from "./search.js";
 
 export type Role = "owner" | "guest";
@@ -314,8 +320,21 @@ function buildGuestServer(clientHint?: string): McpServer {
       `The name of the person you are assisting (e.g. 'Anna'), so ${owner} ` +
         "can see who asked. Use their real name, never a placeholder."
     );
+  // Whitespace (incl. newlines) folds to single spaces: these lines are the
+  // query log, and agent-supplied text must not be able to forge entries.
   const log = (from: string, line: string) =>
-    console.log(`[guest] ${from}: ${line}`);
+    console.log(
+      `[guest] ${from.replace(/\s+/g, " ")}: ${line.replace(/\s+/g, " ")}`
+    );
+  const outOfScope = (relPath: string): CallToolResult => ({
+    content: [
+      {
+        type: "text",
+        text: `Guest access covers pages under wiki/ only; '${relPath}' is out of scope.`,
+      },
+    ],
+    isError: true,
+  });
 
   const server = new McpServer(
     { name: `${ownerNameSlug(owner)}-exocortex`, version },
@@ -327,8 +346,11 @@ function buildGuestServer(clientHint?: string): McpServer {
         `(1) Pages are a compiled record of ${owner}'s thinking, not ${owner} speaking. Each ` +
         `page carries a status: 'verified' pages are human-confirmed; 'draft' pages are ` +
         `machine-written and may contain inference or errors, and most pages are drafts by ` +
-        `design. Attribute what you relay ("${owner}'s notes say ...") and mention draft ` +
-        `status when it materially affects an answer. ` +
+        `design. Rarer statuses: treat 'stale' as possibly outdated and 'disputed' as ` +
+        `unreliable, and on pages flagged pending_review, weight any "Unreviewed additions" ` +
+        `sections as draft even though the rest is verified. Attribute what you relay ` +
+        `("${owner}'s notes say ...") and mention draft status when it materially affects ` +
+        `an answer. ` +
         `(2) Always identify your user. Every tool takes a 'from' field: fill it with the ` +
         `actual name of the person you are assisting, so ${owner} can see who asked what ` +
         `and who left which note. ` +
@@ -356,7 +378,12 @@ function buildGuestServer(clientHint?: string): McpServer {
     },
     async ({ from, query, limit }) => {
       log(from, `query_wiki "${query}"`);
-      const hits = await queryWiki(query, limit ?? 8, "concise", deny);
+      const hits = await queryWiki(
+        query,
+        limit ?? 8,
+        "concise",
+        (p) => guestWikiPath(p, deny) === null
+      );
       return { content: [{ type: "text", text: formatHits(query, hits) }] };
     }
   );
@@ -380,16 +407,13 @@ function buildGuestServer(clientHint?: string): McpServer {
     },
     async ({ from, path: relPath, section }) => {
       const norm = guestWikiPath(relPath, deny);
-      if (norm === null) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Guest access covers pages under wiki/ only; '${relPath}' is out of scope.`,
-            },
-          ],
-          isError: true,
-        };
+      if (norm === null) return outOfScope(relPath);
+      // The guard is lexical; a symlink committed under wiki/ could resolve
+      // elsewhere. Re-check the real on-disk path against the same guard.
+      await ensureFresh();
+      const real = await realRelPath(norm);
+      if (real === null || guestWikiPath(real, deny) === null) {
+        return outOfScope(relPath);
       }
       log(from, `get_page ${norm}${section ? ` § ${section}` : ""}`);
       return getPage(norm, undefined, section, (child) => guestWikiPath(child, deny) !== null);
@@ -421,6 +445,7 @@ function buildGuestServer(clientHint?: string): McpServer {
         description: `Note from ${from} via the guest connector`,
         provenance: guestProvenance(from, date),
         client: clientHint,
+        filenamePrefix: "guest-note-",
       });
       return {
         content: [

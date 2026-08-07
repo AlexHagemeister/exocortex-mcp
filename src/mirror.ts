@@ -75,6 +75,7 @@ export async function listMarkdown(relDir: string): Promise<string[]> {
     for (const entry of entries) {
       if (entry.name.startsWith(".")) continue;
       const full = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue; // a symlinked .md would index its target's content
       if (entry.isDirectory()) await walk(full);
       else if (entry.name.endsWith(".md")) out.push(path.relative(MIRROR_DIR, full));
     }
@@ -97,6 +98,26 @@ export function resolveRepoPath(relPath: string): string {
 
 export async function readRepoFile(relPath: string): Promise<string> {
   return fs.readFile(resolveRepoPath(relPath), "utf8");
+}
+
+/**
+ * The repo-relative path after following symlinks: the input itself when
+ * nothing exists on disk (nothing to follow), or null when a symlink resolves
+ * outside the mirror. resolveRepoPath's containment check is lexical, so a
+ * symlink committed into the vault would otherwise be followed silently;
+ * scope-restricted callers re-check the returned path against their scope.
+ */
+export async function realRelPath(relPath: string): Promise<string | null> {
+  const abs = resolveRepoPath(relPath);
+  let real: string;
+  try {
+    real = await fs.realpath(abs);
+  } catch {
+    return relPath;
+  }
+  const root = await fs.realpath(MIRROR_DIR);
+  if (real !== root && !real.startsWith(root + path.sep)) return null;
+  return path.relative(root, real).split(path.sep).join("/");
 }
 
 export async function statRepoPath(
