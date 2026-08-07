@@ -86,6 +86,19 @@ test("yamlEscape folds newlines so hostile input can't corrupt frontmatter", asy
   assert.equal(yamlEscape('say "hi"'), '"say \\"hi\\""');
 });
 
+test("escaped frontmatter round-trips through gray-matter, hostile or benign", async () => {
+  process.env.MIRROR_REPO_URL ??= "/tmp/unused";
+  process.env.EXOCORTEX_TOKEN ??= "test-token-of-sufficient-length";
+  const { yamlEscape } = await import("../src/capture.js");
+  const { default: matter } = await import("gray-matter");
+  const hostileType = 'Correction "quoted"\nsneaky: yes';
+  const parsed = matter(`---\ntype: ${yamlEscape(hostileType)}\n---\nbody`);
+  assert.equal(parsed.data.type, 'Correction "quoted"\nsneaky: yes');
+  assert.ok(!("sneaky" in parsed.data));
+  const benign = matter(`---\ntype: ${yamlEscape("Capture")}\n---\nx`);
+  assert.equal(benign.data.type, "Capture");
+});
+
 test("owner name slugs", () => {
   assert.equal(ownerNameSlug("Alex"), "alex");
   assert.equal(ownerNameSlug("Alex H."), "alex-h");
