@@ -107,7 +107,8 @@ function makeSnippet(doc: WikiDoc, terms: string[]): string {
 export async function queryWiki(
   query: string,
   limit = 8,
-  detail: SearchDetail = "concise"
+  detail: SearchDetail = "concise",
+  excludePrefixes: string[] = []
 ): Promise<WikiHit[]> {
   const docs = await getIndex();
   const terms = query
@@ -119,6 +120,7 @@ export async function queryWiki(
 
   const hits: WikiHit[] = [];
   for (const doc of docs) {
+    if (excludePrefixes.some((p) => doc.path.startsWith(p))) continue;
     let score = 0;
     for (const term of terms) {
       if (doc.title.toLowerCase().includes(term)) score += 4;

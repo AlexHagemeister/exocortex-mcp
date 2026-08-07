@@ -4,6 +4,9 @@ Notable changes to exocortex-mcp, per release. Format follows [Keep a Changelog]
 
 ## [Unreleased]
 
+### Added
+- Guest tier: a second secret URL (`EXOCORTEX_GUEST_TOKEN` + `EXOCORTEX_OWNER_NAME`) that serves trusted people a guest-facing manifest from the same deployment — the token a connection authenticates with picks which face it sees, and the owner's server is byte-for-byte unchanged. Guests get `query_wiki` and `get_page` scoped to `wiki/` (day logs and their derived index excluded; `EXOCORTEX_GUEST_DENY` extends the deny list), plus `leave_note_for_<owner>` whose provenance the server composes from a required `from` field — a guest note can never carry the owner's provenance, so the ingest pipeline can't mistake a guest's words for the owner's. Guest tool calls are logged with the caller's name. Scope guard covered by unit tests (traversal, deny-list, listing filter).
+
 ### Security
 - `/healthz/deep` could return the GitHub PAT from `MIRROR_REPO_URL` in plaintext to unauthenticated callers (#6). A failed `execFile` puts the full git command line — PAT included — into `err.message`, which `deepHealth()` served verbatim in `degraded[]` and the startup sync logged via `console.error`. Any git failure triggered it: mis-pasted URL, expired PAT, GitHub outage, DNS failure. Credentials are now scrubbed at the source — the `git()` wrapper redacts URL userinfo and GitHub token literals from `message`/`stdout`/`stderr` before rethrowing — and again at the two response boundaries and the startup log as defense in depth. Covered by the repo's first unit tests, which CI now runs.
 

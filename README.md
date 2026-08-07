@@ -64,6 +64,17 @@ claude.ai custom connectors currently support **OAuth 2.1** (heavyweight for a p
 
 This is personal-server auth: one user, one secret. If your deployment ever becomes multi-user, the upgrade path is a proper OAuth 2.1 authorization server per the MCP auth spec.
 
+## Guest access
+
+Optionally, the same deployment can serve a second audience: trusted people you hand a guest URL to, so their Claude can query your exocortex. There is no manifest file anywhere — the manifest is what the server *answers* during the MCP handshake, and the token a connection authenticated with picks the answer. Your token sees the server above, unchanged. The guest token sees a different face:
+
+- Server name `<owner>-exocortex`, with instructions written for an agent that has never heard of your vault: what this is, that pages are a compiled record of your thinking (not you speaking), and how to weight `verified` vs `draft`.
+- `query_wiki` and `get_page`, scoped to `wiki/` — never `sources/`, `notes/`, or the day logs (`wiki/log/` and its derived index). Directory listings are filtered the same way. `EXOCORTEX_GUEST_DENY` adds comma-separated prefixes to the deny list (e.g. `wiki/people/`).
+- `leave_note_for_<owner>` instead of `capture_to_inbox`: guests can drop a note into your review inbox, but the server composes the provenance itself (`"Anna, via their Claude (guest connector), <date>"`) — a guest note can never masquerade as you to your ingest pipeline.
+- Every guest tool requires a `from` field naming the person, and each call is logged (`[guest] Anna: query_wiki "..."`), so your host's logs are the query log.
+
+Enable it by setting `EXOCORTEX_GUEST_TOKEN` (a second `openssl rand -hex 32`) and `EXOCORTEX_OWNER_NAME` (e.g. `Alex`). Then hand each trusted person `https://<host>/t/<guest-token>/mcp` to paste into **Settings → Connectors → Add custom connector**. The URL is the credential: everyone holding it is "a trusted friend" to the server, and rotating the env var revokes them all. If you ever want per-person revocation or real (non-self-reported) attribution, that's the moment to mint per-person tokens — or graduate to OAuth.
+
 ## Deploy your own (Railway, ~10 minutes)
 
 Any Node host works; Railway is what the reference deployment uses.
