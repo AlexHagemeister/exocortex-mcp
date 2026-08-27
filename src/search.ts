@@ -3,13 +3,25 @@ import { ensureFresh, listMarkdown, readRepoFile } from "./mirror.js";
 
 export type SearchDetail = "concise" | "full";
 
+/** Which vault layers to search. The wiki is the compiled layer; sources are
+ * frozen records of what was said; notes are the user's own words. Guest
+ * connections are always scoped to "wiki" regardless of what they ask for. */
+export type SearchScope = "wiki" | "sources" | "notes" | "all";
+
+const SCOPE_ROOTS: Record<Exclude<SearchScope, "all">, string> = {
+  wiki: "wiki",
+  sources: "sources",
+  notes: "notes",
+};
+
 export interface WikiHit {
   path: string;
   title: string;
   description: string;
   status: string;
   score: number;
-  /** Present only when the page has no description to stand in for it. */
+  /** Where the query matched in the body — always present so a hit whose
+   * description says nothing about the matched term is still judgeable. */
   snippet?: string;
   /** Present only for detail: "full". */
   body?: string;
@@ -17,6 +29,7 @@ export interface WikiHit {
 
 interface WikiDoc {
   path: string;
+  root: keyof typeof SCOPE_ROOTS;
   title: string;
   description: string;
   tags: string[];
@@ -27,7 +40,8 @@ interface WikiDoc {
 
 // Trust is graduated in the vault: agents write freely as draft, promotion to
 // verified is a human act, and readers weight by status. Missing status means
-// the page predates the status model or is index scaffolding.
+// the page predates the status model, is index scaffolding, or is a source or
+// note (which carry provenance, not status).
 const STATUS_WEIGHT: Record<string, number> = {
   verified: 1.5,
   draft: 1.0,
@@ -38,31 +52,36 @@ let index: WikiDoc[] | null = null;
 let indexedAt = 0;
 
 async function buildIndex(): Promise<WikiDoc[]> {
-  const files = await listMarkdown("wiki");
   const docs: WikiDoc[] = [];
-  for (const file of files) {
-    let raw: string;
-    try {
-      raw = await readRepoFile(file);
-    } catch {
-      continue;
+  for (const root of Object.keys(SCOPE_ROOTS) as (keyof typeof SCOPE_ROOTS)[]) {
+    const files = await listMarkdown(SCOPE_ROOTS[root]);
+    for (const file of files) {
+      let raw: string;
+      try {
+        raw = await readRepoFile(file);
+      } catch {
+        continue;
+      }
+      let parsed;
+      try {
+        parsed = matter(raw);
+      } catch {
+        parsed = { data: {}, content: raw };
+      }
+      const data = parsed.data as Record<string, unknown>;
+      docs.push({
+        path: file,
+        root,
+        title: String(
+          data.title ?? file.replace(new RegExp(`^${root}/`), "").replace(/\.md$/, "")
+        ),
+        description: String(data.description ?? ""),
+        tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
+        status: String(data.status ?? ""),
+        body: parsed.content,
+        bodyLower: parsed.content.toLowerCase(),
+      });
     }
-    let parsed;
-    try {
-      parsed = matter(raw);
-    } catch {
-      parsed = { data: {}, content: raw };
-    }
-    const data = parsed.data as Record<string, unknown>;
-    docs.push({
-      path: file,
-      title: String(data.title ?? file.replace(/^wiki\//, "").replace(/\.md$/, "")),
-      description: String(data.description ?? ""),
-      tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
-      status: String(data.status ?? ""),
-      body: parsed.content,
-      bodyLower: parsed.content.toLowerCase(),
-    });
   }
   return docs;
 }
@@ -70,7 +89,7 @@ async function buildIndex(): Promise<WikiDoc[]> {
 async function getIndex(): Promise<WikiDoc[]> {
   await ensureFresh();
   // Rebuild whenever the index is older than a minute past the last use of it;
-  // cheap enough for a vault of this size (~100 pages).
+  // cheap enough for a vault of this size.
   if (!index || Date.now() - indexedAt > 60_000) {
     index = await buildIndex();
     indexedAt = Date.now();
@@ -111,7 +130,8 @@ export async function queryWiki(
   /** Return true to hide a page from results — evaluated before scoring, so
    * excluded pages never surface as snippets, descriptions, or bodies. The
    * guest tier passes its path guard here so search and reads agree exactly. */
-  exclude?: (path: string) => boolean
+  exclude?: (path: string) => boolean,
+  scope: SearchScope = "wiki"
 ): Promise<WikiHit[]> {
   const docs = await getIndex();
   const terms = query
@@ -123,6 +143,7 @@ export async function queryWiki(
 
   const hits: WikiHit[] = [];
   for (const doc of docs) {
+    if (scope !== "all" && doc.root !== scope) continue;
     if (exclude?.(doc.path)) continue;
     let score = 0;
     for (const term of terms) {
@@ -140,8 +161,8 @@ export async function queryWiki(
       description: doc.description,
       status: doc.status || "(none)",
       score: Math.round(score * 100) / 100,
+      snippet: makeSnippet(doc, terms),
     };
-    if (!doc.description) hit.snippet = makeSnippet(doc, terms);
     if (detail === "full") hit.body = doc.body;
     hits.push(hit);
   }

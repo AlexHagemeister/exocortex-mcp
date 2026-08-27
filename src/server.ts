@@ -19,7 +19,7 @@ import {
   realRelPath,
   statRepoPath,
 } from "./mirror.js";
-import { queryWiki, type WikiHit } from "./search.js";
+import { queryWiki, type SearchScope, type WikiHit } from "./search.js";
 
 export type Role = "owner" | "guest";
 
@@ -47,14 +47,27 @@ function listHeadings(lines: string[]): Heading[] {
 
 /**
  * Extract a named section: from its heading up to the next heading of the
- * same or higher level. Returns null when no heading matches.
+ * same or higher level. Matches the full heading text first, then falls back
+ * to a unique substring match — this vault's headings are long and dated, so
+ * exact-only matching made natural requests miss. Returns null when nothing
+ * matches; an ambiguous substring is an error listing the candidates.
  */
-function extractSection(body: string, section: string): string | null {
+export function extractSection(
+  body: string,
+  section: string
+): string | { ambiguous: string[] } | null {
   const lines = body.split("\n");
   const headings = listHeadings(lines);
   const wanted = section.trim().toLowerCase();
-  const idx = headings.findIndex((h) => h.text.toLowerCase() === wanted);
-  if (idx === -1) return null;
+  let idx = headings.findIndex((h) => h.text.toLowerCase() === wanted);
+  if (idx === -1) {
+    const partial = headings
+      .map((h, i) => ({ h, i }))
+      .filter(({ h }) => h.text.toLowerCase().includes(wanted));
+    if (partial.length === 0) return null;
+    if (partial.length > 1) return { ambiguous: partial.map(({ h }) => h.text) };
+    idx = partial[0].i;
+  }
   const start = headings[idx].line;
   const next = headings
     .slice(idx + 1)
@@ -70,7 +83,8 @@ function formatHits(query: string, hits: WikiHit[]): string {
       (h) =>
         `## ${h.title}\n` +
         `path: ${h.path} · status: ${h.status} · score: ${h.score}\n` +
-        (h.description ? `${h.description}` : `> ${h.snippet}`) +
+        (h.description ? `${h.description}\n` : "") +
+        (h.snippet ? `> ${h.snippet}` : "") +
         (h.body ? `\n\n${h.body}` : "")
     )
     .join("\n\n");
@@ -135,6 +149,19 @@ async function getPage(
       // treat the whole file as body
     }
     const slice = extractSection(body, section);
+    if (slice !== null && typeof slice === "object") {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Section "${section}" is ambiguous in ${relPath} — it matches: ` +
+              slice.ambiguous.join(" · "),
+          },
+        ],
+        isError: true,
+      };
+    }
     if (slice === null) {
       const available = listHeadings(body.split("\n"))
         .map((h) => h.text)
@@ -200,14 +227,15 @@ function buildOwnerServer(clientHint?: string): McpServer {
   server.registerTool(
     "query_wiki",
     {
-      title: "Query the exocortex wiki",
+      title: "Query the exocortex vault",
       description:
-        "Status-weighted search over the vault's wiki (concepts, projects, people, life, connections). " +
-        "Results are ranked with `verified` pages weighted above `draft` — trust is graduated, " +
-        "and a mostly-draft wiki is healthy. Hits are summaries (title, description, path, status) — " +
-        "descriptions are written as retrieval hooks, so they are usually enough to pick the right " +
-        "page. Use get_page to read a hit, or detail: 'full' only when you truly need every " +
-        "matching page's body inline.",
+        "Status-weighted search over the vault. Default scope 'all' covers the wiki (compiled " +
+        "knowledge: concepts, projects, people, life, connections), sources (frozen records of " +
+        "what was said — meeting transcripts, session captures, statements), and notes (the " +
+        "user's own words). Results are ranked with `verified` wiki pages weighted above " +
+        "`draft` — trust is graduated, and a mostly-draft wiki is healthy. Hits are summaries " +
+        "(title, description, path, status, a matched-text snippet). Use get_page to read a " +
+        "hit, or detail: 'full' only when you truly need every matching page's body inline.",
       inputSchema: {
         query: z.string().describe("Search terms, e.g. 'kairoscope design spec'"),
         limit: z.number().int().min(1).max(25).optional().describe("Max results (default 8)"),
@@ -215,10 +243,23 @@ function buildOwnerServer(clientHint?: string): McpServer {
           .enum(["concise", "full"])
           .optional()
           .describe("'concise' (default) returns summaries; 'full' includes each page's body"),
+        scope: z
+          .enum(["all", "wiki", "sources", "notes"])
+          .optional()
+          .describe(
+            "'all' (default) searches every layer; narrow to 'wiki' (compiled pages), " +
+              "'sources' (frozen records), or 'notes' (the user's own notes)"
+          ),
       },
     },
-    async ({ query, limit, detail }) => {
-      const hits = await queryWiki(query, limit ?? 8, detail ?? "concise");
+    async ({ query, limit, detail, scope }) => {
+      const hits = await queryWiki(
+        query,
+        limit ?? 8,
+        detail ?? "concise",
+        undefined,
+        (scope as SearchScope | undefined) ?? "all"
+      );
       return { content: [{ type: "text", text: formatHits(query, hits) }] };
     }
   );
@@ -231,8 +272,9 @@ function buildOwnerServer(clientHint?: string): McpServer {
         "Read a file from the vault by repo-relative path (e.g. 'wiki/projects/kairoscope.md', " +
         "'CONSTITUTION.md'). Pass a directory path to list its contents. When you only need part " +
         "of a page, ask for a slice: mode: 'frontmatter' returns just the metadata block, and " +
-        "section: '<heading>' returns just that section. Content is read from the git mirror, " +
-        "so freshness is bounded by the nightly snapshot.",
+        "section: '<heading>' returns just that section (full heading text or a unique " +
+        "substring of it). Content is read from the git mirror, which syncs from the vault's " +
+        "hourly snapshots — typically fresh to within the hour.",
       inputSchema: {
         path: z.string().describe("Repo-relative path to a file or directory"),
         mode: z
@@ -357,7 +399,7 @@ function buildGuestServer(clientHint?: string): McpServer {
         `(3) ${noteTool} drops a note into ${owner}'s review inbox, attributed to your user. ` +
         `Use it when your user wants to tell ${owner} something, or to correct something ` +
         `these pages say about them. Nothing you write changes the wiki directly. ` +
-        `(4) Content syncs roughly nightly; very recent events may be missing. Say so ` +
+        `(4) Content syncs roughly hourly; very recent events may be missing. Say so ` +
         `rather than concluding something did not happen.`,
     }
   );
