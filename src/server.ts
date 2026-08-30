@@ -220,7 +220,10 @@ function buildOwnerServer(clientHint?: string): McpServer {
         "A capture whose provenance says only 'the user' must contain only what the user said. " +
         "(3) Name each claim's speaker so attribution is recoverable per claim, not just per file. " +
         "(4) Never write a guess or interpretation with the typography of fact — mark inference " +
-        "as inference, and when part of a capture is uncertain, say which part.",
+        "as inference, and when part of a capture is uncertain, say which part. " +
+        "(5) Name a sibling capture by its basename wikilink ([[2026-08-28-example-capture]]), " +
+        "never by its sources/inbox/ path. Filing changes a capture's path and not its name, and " +
+        "a filed source is frozen, so an inbox path written now dies the moment either file is filed.",
     }
   );
 
