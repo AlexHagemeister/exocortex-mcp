@@ -10,9 +10,12 @@ import { buildServer, type Role } from "./server.js";
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-// Shallow liveness: is the process up.
+// Shallow liveness: is the process up. `build` names the serving commit
+// (Railway injects RAILWAY_GIT_COMMIT_SHA) so a deploy is verifiable from
+// outside with one curl; "dev" means a local run.
+const BUILD = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? "dev";
 app.get("/healthz", (_req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, build: BUILD });
 });
 
 // Deep health for external monitoring: 503 when sync is broken or captures
