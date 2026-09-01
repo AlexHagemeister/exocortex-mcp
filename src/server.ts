@@ -20,6 +20,7 @@ import {
   statRepoPath,
 } from "./mirror.js";
 import { queryWiki, type SearchScope, type WikiHit } from "./search.js";
+import { validateCapture } from "./validate.js";
 
 export type Role = "owner" | "guest";
 
@@ -222,8 +223,10 @@ function buildOwnerServer(clientHint?: string): McpServer {
         "(4) Never write a guess or interpretation with the typography of fact — mark inference " +
         "as inference, and when part of a capture is uncertain, say which part. " +
         "(5) Name a sibling capture by its basename wikilink ([[2026-08-28-example-capture]]), " +
-        "never by its sources/inbox/ path. Filing changes a capture's path and not its name, and " +
-        "a filed source is frozen, so an inbox path written now dies the moment either file is filed.",
+        "never by its sources/inbox/ path, which dies the moment either file is filed. " +
+        "The server enforces two of these at write time and rejects the capture with the fix named: " +
+        "every blockquote needs a speaker signal within it or the two lines around it (1), and " +
+        "no sources/inbox/ path may appear (5).",
     }
   );
 
@@ -330,6 +333,21 @@ function buildOwnerServer(clientHint?: string): McpServer {
       },
     },
     async (input) => {
+      // Owner tier only: the guest note tool below never runs these checks.
+      const problems = validateCapture(input.content, "owner");
+      if (problems.length > 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                "Capture rejected, nothing was written. Fix and resend:\n" +
+                problems.map((p) => `- ${p}`).join("\n"),
+            },
+          ],
+          isError: true,
+        };
+      }
       const relPath = await captureToInbox({ ...input, client: clientHint });
       return {
         content: [
