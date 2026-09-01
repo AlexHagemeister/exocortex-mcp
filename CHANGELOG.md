@@ -5,6 +5,7 @@ Notable changes to exocortex-mcp, per release. Format follows [Keep a Changelog]
 ## [Unreleased]
 
 ### Added
+- Owner-tier `capture_to_inbox` now rejects, before writing, two capture defects the contract already forbade in prose: sibling citations by `sources/inbox/` path (name the sibling by basename wikilink) and blockquotes with no speaker signal within two lines. The rejection names the fix. Guest tier untouched. First write-time enforcement of the vault's claim conventions (meta/CLAIM-SPEC.md trial, 2026-09-01).
 - `query_wiki` gains a `scope` parameter for the owner tier — `all` (the new default), `wiki`, `sources`, or `notes` — so remote sessions can search the frozen source records and the user's own notes, not just the compiled wiki. Prompted by a 2026-08-27 voice-session report of sparse retrieval: anything not yet compiled into a wiki page was invisible. The guest tier is unchanged and remains hard-scoped to `wiki/`.
 - Every search hit now carries a matched-text snippet alongside its description. Previously the snippet appeared only when a page had no description, so a page matched on body content showed a description that might say nothing about the matched term, giving the caller no reason to open it.
 - `get_page`'s `section` parameter falls back to a unique case-insensitive substring match when no heading matches exactly; an ambiguous substring errors with the candidate headings. The vault's headings are long and dated, so exact-only matching made natural requests ("enrollment state") miss.
