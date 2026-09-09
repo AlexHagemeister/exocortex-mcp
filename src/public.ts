@@ -1,3 +1,4 @@
+import matter from "gray-matter";
 import { guestWikiPath } from "./guest.js";
 
 /**
@@ -158,16 +159,37 @@ export function mentions(text: string, matcher: TermMatcher): boolean {
 }
 
 const FENCE = /^(```|~~~)/;
-const HEADING = /^(#{1,6})\s/;
+const ATX = /^(#{1,6})\s/;
+const SETEXT_UNDERLINE = /^\s*(=+|-+)\s*$/;
 /** Lines that stand alone inside a block: list items, table rows, quotes. */
 const LINE_ITEM = /^\s*(?:[-*+]\s|\d+[.)]\s|\||>)/;
 
+/** A heading starting at line i: its level and how many lines it spans. */
+function headingAt(lines: string[], i: number): { level: number; span: number } | null {
+  const h = ATX.exec(lines[i]);
+  if (h) return { level: h[1].length, span: 1 };
+  const next = lines[i + 1];
+  if (
+    next !== undefined &&
+    lines[i].trim() !== "" &&
+    !LINE_ITEM.test(lines[i]) &&
+    !FENCE.test(lines[i]) &&
+    SETEXT_UNDERLINE.test(next)
+  ) {
+    return { level: next.trim().startsWith("=") ? 1 : 2, span: 2 };
+  }
+  return null;
+}
+
 /**
  * Remove every block of a markdown body that mentions a blocked term, and
- * nothing else. A titled section (heading through the next heading of the
- * same or higher level) goes when its heading mentions a term; a fenced code
- * block goes whole; a list, table, or quote loses only the offending lines;
- * any other paragraph goes whole. Nothing marks the removal.
+ * nothing else. Blocks are matched as a whole (lines joined), so a
+ * multi-word term wrapped across a soft line break is still caught. A
+ * titled section (ATX or setext heading through the next heading of the
+ * same or higher level, fences respected) goes when its heading mentions a
+ * term; a fenced code block goes whole; a list, table, or quote loses only
+ * the offending lines (and goes whole if the term spans lines); any other
+ * paragraph goes whole. Nothing marks the removal.
  */
 export function redactBody(body: string, matcher: TermMatcher): string {
   if (matcher === null || !matcher.test(body)) return body;
@@ -176,14 +198,28 @@ export function redactBody(body: string, matcher: TermMatcher): string {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    // A titled section: drop through the next heading at its level or above.
-    const h = HEADING.exec(line);
-    if (h && matcher.test(line)) {
-      const level = h[1].length;
-      i++;
+    const hd = headingAt(lines, i);
+    if (hd) {
+      const headingLines = lines.slice(i, i + hd.span);
+      if (!matcher.test(headingLines.join(" "))) {
+        out.push(...headingLines);
+        i += hd.span;
+        continue;
+      }
+      // Drop the section: through the next heading at this level or above,
+      // ignoring anything that looks like a heading inside a fence.
+      i += hd.span;
+      let inFence = false;
       while (i < lines.length) {
-        const nh = HEADING.exec(lines[i]);
-        if (nh && nh[1].length <= level) break;
+        if (FENCE.test(lines[i])) {
+          inFence = !inFence;
+          i++;
+          continue;
+        }
+        if (!inFence) {
+          const nh = headingAt(lines, i);
+          if (nh && nh.level <= hd.level) break;
+        }
         i++;
       }
       continue;
@@ -197,7 +233,7 @@ export function redactBody(body: string, matcher: TermMatcher): string {
         i++;
         if (FENCE.test(fence[fence.length - 1])) break;
       }
-      if (!fence.some((l) => matcher.test(l))) out.push(...fence);
+      if (!matcher.test(fence.join(" "))) out.push(...fence);
       continue;
     }
     // Blank lines pass through; blocks are the runs between them.
@@ -207,20 +243,25 @@ export function redactBody(body: string, matcher: TermMatcher): string {
       continue;
     }
     const block: string[] = [];
-    while (i < lines.length && lines[i].trim() !== "" && !FENCE.test(lines[i])) {
-      if (block.length > 0 && HEADING.test(lines[i])) break;
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !FENCE.test(lines[i]) &&
+      (block.length === 0 || headingAt(lines, i) === null)
+    ) {
       block.push(lines[i]);
       i++;
-      if (HEADING.test(block[0])) break;
     }
     if (block.every((l) => LINE_ITEM.test(l))) {
-      out.push(...block.filter((l) => !matcher.test(l)));
-    } else if (!block.some((l) => matcher.test(l))) {
+      let kept = block.filter((l) => !matcher.test(l));
+      if (matcher.test(kept.join(" "))) kept = [];
+      out.push(...kept);
+    } else if (!matcher.test(block.join(" "))) {
       out.push(...block);
     }
   }
-  // Collapse the triple blank lines that removals leave behind.
-  return out.join("\n").replace(/\n{3,}/g, "\n\n");
+  // Collapse the blank lines that removals leave behind.
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
 }
 
 /**
@@ -233,6 +274,17 @@ export function redactPage(content: string, matcher: TermMatcher): string | null
   if (matcher === null || !matcher.test(content)) return content;
   const m = /^(---\r?\n)([\s\S]*?)(\r?\n---(?:\r?\n|$))/.exec(content);
   if (!m) return redactBody(content, matcher);
+  // Parsed first, so a folded or multi-line title/description counts; the
+  // line scan below is the fallback when the YAML does not parse.
+  try {
+    const data = matter(content).data as Record<string, unknown>;
+    for (const key of ["title", "description"]) {
+      const v = data[key];
+      if (v !== undefined && matcher.test(String(v))) return null;
+    }
+  } catch {
+    // fall through to the line scan
+  }
   const fmLines = m[2].split(/\r?\n/);
   for (const l of fmLines) {
     if (/^(title|description)\s*:/i.test(l) && matcher.test(l)) return null;

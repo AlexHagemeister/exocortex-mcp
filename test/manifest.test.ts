@@ -42,6 +42,11 @@ before(() => {
   );
   write("wiki/projects/pangolin-deal.md", page("The deal", "Named for it in the path; pelicans."));
   write("wiki/projects/shindig.md", page("Big Stick Shindig", "Named for it in the title; pelicans."));
+  write("wiki/projects/pangolin/deals/2024/x.md", page("X", "pelicans in a term-named folder"));
+  write(
+    "wiki/projects/hidden/only.md",
+    '---\ntitle: "Only"\ndescription: "named for pangolin here; pelicans"\nstatus: draft\n---\n# Only\n\npelicans\n'
+  );
   write("wiki/life/pursuit.md", page("Pursuit", "What Alex is after: pelicans too."));
   write("wiki/life/health/back.md", page("Back", "Private health detail: zebrafish."));
   write("wiki/people/anna.md", page("Anna", "A friend. Likes zebrafish."));
@@ -151,6 +156,13 @@ test("public: in-scope reads and filtered listings", async () => {
   }
   const projects = await text(c, "get_page", { path: "wiki/projects" });
   assert.deepEqual(projects.text.split("\n").slice(1), ["kairoscope.md"]);
+  // a term-named directory, its subtree, and a fully hidden directory all
+  // answer exactly like missing paths
+  for (const p of ["wiki/projects/pangolin", "wiki/projects/pangolin/deals", "wiki/projects/pangolin/deals/2024/x.md", "wiki/projects/hidden"]) {
+    const r = await text(c, "get_page", { path: p });
+    assert.equal(r.isError, true, p);
+    assert.equal(r.text, `Not found: ${p}`, p);
+  }
   const sect = await text(c, "get_page", { path: "wiki/life/pursuit.md", section: "Pursuit" });
   assert.match(sect.text, /pelicans too/);
   const root = await text(c, "get_page", { path: "wiki" });

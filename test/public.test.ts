@@ -246,3 +246,44 @@ test("redactPage hides pages named for a term and scrubs frontmatter otherwise",
   assert.equal(redactPage(bare, m), "no frontmatter\n\nand more");
   assert.equal(redactPage(tagged, null), tagged);
 });
+
+// ---- from the adversarial review of PR #13 ----
+test("a multi-word term wrapped across a line break is still caught", () => {
+  const m = compileTerms(["Jane Doe"]);
+  const para = "The lawyer present was Jane\nDoe, who advised settling.\n\nUnrelated.";
+  assert.equal(redactBody(para, m), "Unrelated.");
+  const list = "- item one\n- the lawyer Jane\n  Doe advised\n- item three";
+  const out = redactBody(list, m);
+  assert.doesNotMatch(out, /Jane|Doe/);
+  const table = "| who | note |\n| --- | --- |\n| Jane Doe | present |\n| ok | fine |";
+  assert.equal(redactBody(table, m), "| who | note |\n| --- | --- |\n| ok | fine |");
+});
+
+test("a # comment inside a fence does not end a section skip", () => {
+  const m = compileTerms(["pangolin"]);
+  const body = [
+    "## Pangolin era", "", "The secret buyout.", "", "```bash", "# build it", "make", "```", "",
+    "More secret detail.", "", "## Public", "", "Stays.",
+  ].join("\n");
+  const out = redactBody(body, m);
+  assert.doesNotMatch(out, /secret|build it|make|```/);
+  assert.match(out, /## Public\n\nStays\./);
+});
+
+test("setext headings title a section too", () => {
+  const m = compileTerms(["pangolin"]);
+  const body = "Pangolin notes\n==============\n\nSecret A.\n\nSub\n---\n\nSecret B.\n\n# Next\n\nStays.";
+  const out = redactBody(body, m);
+  assert.doesNotMatch(out, /Secret|Sub/);
+  assert.match(out, /# Next\n\nStays\./);
+  // an underline after a list item or blank line is not a heading
+  assert.equal(redactBody("- a\n---\n\nb", m), "- a\n---\n\nb");
+});
+
+test("a folded or multi-line description hides the page", () => {
+  const m = compileTerms(["pangolin"]);
+  const folded = '---\ntitle: "Notes"\ndescription: >\n  a page about the pangolin deal\n---\nbody';
+  assert.equal(redactPage(folded, m), null);
+  const quoted = '---\ntitle: "Notes"\ndescription: "line one\n  pangolin on line two"\n---\nbody';
+  assert.equal(redactPage(quoted, m), null);
+});

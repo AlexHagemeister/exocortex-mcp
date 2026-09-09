@@ -116,7 +116,10 @@ async function getPage(
   /** Rewrite file content before any mode or section handling (the public
    * tier's term redaction), so a section slice can never contain what the
    * full page would not. */
-  transform?: (content: string) => string
+  transform?: (content: string) => string,
+  /** Treat a directory with nothing listable as missing (the public tier),
+   * so a fully hidden folder is not an oracle for its own existence. */
+  emptyDirIsMissing = false
 ): Promise<CallToolResult> {
   await ensureFresh();
   if (mode === "frontmatter" && section !== undefined) {
@@ -137,10 +140,19 @@ async function getPage(
   if (kind === "dir") {
     let entries = await listDir(relPath);
     if (filterEntry) {
-      const keep = await Promise.all(
-        entries.map((e) => filterEntry(`${relPath}/${e.replace(/\/$/, "")}`))
-      );
-      entries = entries.filter((_, i) => keep[i]);
+      // Sequential on purpose: a filter may read each file, and a public
+      // caller must not be able to fan that out.
+      const kept: string[] = [];
+      for (const e of entries) {
+        if (await filterEntry(`${relPath}/${e.replace(/\/$/, "")}`)) kept.push(e);
+      }
+      entries = kept;
+    }
+    if (entries.length === 0 && emptyDirIsMissing) {
+      return {
+        content: [{ type: "text", text: `Not found: ${relPath}` }],
+        isError: true,
+      };
     }
     return {
       content: [
@@ -578,11 +590,20 @@ function buildPublicServer(): McpServer {
   // Listing entries are checked where they resolve, not just by name, so a
   // symlink whose read would be refused is not named either; and a file the
   // term filter would refuse is not named.
-  const listableEntry = async (p: string) => {
+  const listableEntry = async (p: string): Promise<boolean> => {
     if (!listable(p)) return false;
     const real = await realRelPath(p);
     if (real === null || !listable(real)) return false;
-    if (terms === null || (await statRepoPath(real)) !== "file") return true;
+    if (terms === null) return true;
+    // A directory named for a term is as hidden as a page named for one,
+    // and a directory with nothing listable inside is not named either.
+    if (mentions(p, terms) || mentions(real, terms)) return false;
+    if ((await statRepoPath(real)) !== "file") {
+      for (const child of await listDir(real)) {
+        if (await listableEntry(`${real}/${child.replace(/\/$/, "")}`)) return true;
+      }
+      return false;
+    }
     let content: string;
     try {
       content = await readRepoFile(real);
@@ -598,6 +619,15 @@ function buildPublicServer(): McpServer {
     content: [{ type: "text", text: `Not found: ${relPath}` }],
     isError: true,
   });
+  // An out-of-scope path pays the same disk work a missing path pays
+  // (sync check, realpath, stat), so latency does not tell the two apart.
+  const DECOY = "wiki/.public-tier-decoy";
+  const notFoundSlow = async (relPath: string): Promise<CallToolResult> => {
+    await ensureFresh();
+    await realRelPath(DECOY);
+    await statRepoPath(DECOY);
+    return notFound(relPath);
+  };
 
   const server = new McpServer(
     { name: `${ownerNameSlug(owner)}-exocortex-public`, version },
@@ -629,12 +659,12 @@ function buildPublicServer(): McpServer {
         "'verified' pages above machine-written 'draft' pages. Hits are summaries (title, " +
         "description, path, status, matched snippet); use get_page to read a full page.",
       inputSchema: {
-        query: z.string().describe("Search terms, e.g. 'current projects'"),
+        query: z.string().max(500).describe("Search terms, e.g. 'current projects'"),
         limit: z.number().int().min(1).max(25).optional().describe("Max results (default 8)"),
       },
     },
     async ({ query, limit }) => {
-      log(`query_wiki "${query}"`);
+      log(`query_wiki ${JSON.stringify(query)}`);
       const hits = await queryWiki(query, limit ?? 8, "concise", (p) => !inScope(p), "wiki", (doc) => {
         if (terms === null) return doc;
         if (
@@ -673,13 +703,13 @@ function buildPublicServer(): McpServer {
     async ({ path: relPath, section }) => {
       const readable = publicWikiPath(relPath, scope);
       const norm = readable ?? publicAncestorPath(relPath, scope);
-      if (norm === null) return notFound(relPath);
+      if (norm === null || mentions(norm, terms)) return notFoundSlow(relPath);
       await ensureFresh();
       // The guard is lexical; a symlink committed under wiki/ could resolve
       // elsewhere. Re-check the real on-disk path against the same guard, at
       // the same access level.
       const real = await realRelPath(norm);
-      if (real === null) return notFound(relPath);
+      if (real === null || mentions(real, terms)) return notFound(relPath);
       if (readable !== null ? !inScope(real) : !listable(real)) return notFound(relPath);
       const kind = await statRepoPath(norm);
       // Missing paths report the caller's own spelling, exactly as an
@@ -693,7 +723,14 @@ function buildPublicServer(): McpServer {
         served = page;
       }
       log(`get_page ${norm}${section ? ` § ${section}` : ""}`);
-      return getPage(norm, undefined, section, listableEntry, served === undefined ? undefined : () => served);
+      return getPage(
+        norm,
+        undefined,
+        section,
+        listableEntry,
+        served === undefined ? undefined : () => served,
+        true
+      );
     }
   );
 
