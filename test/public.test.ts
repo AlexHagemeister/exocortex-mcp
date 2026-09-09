@@ -148,3 +148,101 @@ test("token matching picks the tier, and unset tiers cannot be reached", () => {
   // an empty configured secret never matches an empty presented token
   assert.equal(matchToken("", { token: all.token, publicToken: "" }), null);
 });
+
+// ---- term redaction ----
+import { compileTerms, mentions, redactBody, redactPage } from "../src/public.js";
+
+test("terms match whole words, case-insensitively, with flexible whitespace", () => {
+  const m = compileTerms(["trep", "take 3", "Big Stick"]);
+  assert.equal(mentions("worked with TREP on intake", m), true);
+  assert.equal(mentions("an entrepreneur, intrepid", m), false);
+  assert.equal(mentions("take  3 presents", m), true);
+  assert.equal(mentions("take 3", m), true);
+  assert.equal(mentions("take3", m), false);
+  assert.equal(mentions("the big\nstick shindig", m), true);
+  assert.equal(mentions("bigstick", m), false);
+  assert.equal(mentions("Trep.", m), true);
+  assert.equal(mentions("(trep)", m), true);
+  assert.equal(compileTerms([]), null);
+  assert.equal(compileTerms(["", "  "]), null);
+  assert.equal(mentions("anything", null), false);
+  // regex metacharacters in a term are literal
+  assert.equal(mentions("a.b", compileTerms(["a.b"])), true);
+  assert.equal(mentions("axb", compileTerms(["a.b"])), false);
+});
+
+test("redactBody drops exactly the offending blocks", () => {
+  const m = compileTerms(["pangolin"]);
+  const body = [
+    "# Page",
+    "",
+    "Intro stays.",
+    "",
+    "This paragraph mentions Pangolin Corp",
+    "across two lines.",
+    "",
+    "- keep this",
+    "- a pangolin item goes",
+    "- keep this too",
+    "",
+    "| col | val |",
+    "| --- | --- |",
+    "| ok | 1 |",
+    "| pangolin | 2 |",
+    "",
+    "> quote stays",
+    "> pangolin quote goes",
+    "",
+    "## Pangolin section",
+    "",
+    "Everything under it goes, even without the word.",
+    "",
+    "### Sub of the section",
+    "",
+    "Also goes.",
+    "",
+    "## Next section",
+    "",
+    "Stays.",
+    "",
+    "```",
+    "code with pangolin",
+    "```",
+    "",
+    "```",
+    "clean code",
+    "```",
+    "",
+    "Tail stays.",
+  ].join("\n");
+  const out = redactBody(body, m);
+  assert.doesNotMatch(out, /pangolin/i);
+  assert.doesNotMatch(out, /across two lines|Everything under it|Also goes|Sub of the section/);
+  for (const keep of [
+    "# Page", "Intro stays.", "- keep this", "- keep this too", "| ok | 1 |",
+    "> quote stays", "## Next section", "Stays.", "clean code", "Tail stays.",
+  ]) {
+    assert.ok(out.includes(keep), keep);
+  }
+  assert.doesNotMatch(out, /\n{3,}/);
+  // no terms, or no mention: byte-identical passthrough
+  assert.equal(redactBody(body, null), body);
+  assert.equal(redactBody("nothing here", m), "nothing here");
+});
+
+test("redactPage hides pages named for a term and scrubs frontmatter otherwise", () => {
+  const m = compileTerms(["pangolin"]);
+  const named = '---\ntitle: "Pangolin notes"\ndescription: "x"\n---\nbody';
+  assert.equal(redactPage(named, m), null);
+  const described = '---\ntitle: "Notes"\ndescription: "About the pangolin deal"\n---\nbody';
+  assert.equal(redactPage(described, m), null);
+  const tagged = '---\ntitle: "Notes"\ntags:\n  - pangolin\n  - keep\nstatus: draft\n---\n\nA pangolin line.\n\nKept.\n';
+  const out = redactPage(tagged, m);
+  assert.ok(out !== null);
+  assert.doesNotMatch(out, /pangolin/i);
+  assert.match(out, /^---\ntitle: "Notes"\ntags:\n  - keep\nstatus: draft\n---\n/);
+  assert.match(out, /Kept\./);
+  const bare = "no frontmatter\n\nwith a pangolin paragraph\n\nand more";
+  assert.equal(redactPage(bare, m), "no frontmatter\n\nand more");
+  assert.equal(redactPage(tagged, null), tagged);
+});

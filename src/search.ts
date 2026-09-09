@@ -27,8 +27,16 @@ export interface WikiHit {
   body?: string;
 }
 
-interface WikiDoc {
+/** The parts of an indexed page a view may inspect or rewrite. */
+export interface SearchDoc {
   path: string;
+  title: string;
+  description: string;
+  tags: string[];
+  body: string;
+}
+
+interface WikiDoc extends SearchDoc {
   root: keyof typeof SCOPE_ROOTS;
   title: string;
   description: string;
@@ -131,7 +139,11 @@ export async function queryWiki(
    * excluded pages never surface as snippets, descriptions, or bodies. The
    * guest tier passes its path guard here so search and reads agree exactly. */
   exclude?: (path: string) => boolean,
-  scope: SearchScope = "wiki"
+  scope: SearchScope = "wiki",
+  /** Rewrite a page before it is matched, snippeted, or returned; null hides
+   * it. The public tier passes its term redaction here so a blocked term can
+   * neither match a query nor appear in a snippet or body. */
+  view?: (doc: SearchDoc) => SearchDoc | null
 ): Promise<WikiHit[]> {
   const docs = await getIndex();
   const terms = query
@@ -142,9 +154,17 @@ export async function queryWiki(
   if (terms.length === 0) return [];
 
   const hits: WikiHit[] = [];
-  for (const doc of docs) {
-    if (scope !== "all" && doc.root !== scope) continue;
-    if (exclude?.(doc.path)) continue;
+  for (const indexed of docs) {
+    if (scope !== "all" && indexed.root !== scope) continue;
+    if (exclude?.(indexed.path)) continue;
+    let doc: WikiDoc = indexed;
+    if (view) {
+      const seen = view(indexed);
+      if (seen === null) continue;
+      if (seen !== indexed) {
+        doc = { ...indexed, ...seen, bodyLower: seen.body.toLowerCase() };
+      }
+    }
     let score = 0;
     for (const term of terms) {
       if (doc.title.toLowerCase().includes(term)) score += 4;

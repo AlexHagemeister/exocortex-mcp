@@ -22,8 +22,12 @@ import {
 import {
   DEFAULT_PUBLIC_ALLOW,
   DEFAULT_PUBLIC_DENY,
+  compileTerms,
+  mentions,
   publicAncestorPath,
   publicWikiPath,
+  redactBody,
+  redactPage,
   type PublicScope,
 } from "./public.js";
 import { queryWiki, type SearchScope, type WikiHit } from "./search.js";
@@ -108,7 +112,11 @@ async function getPage(
   relPath: string,
   mode: "full" | "frontmatter" | undefined,
   section: string | undefined,
-  filterEntry?: (childRelPath: string) => boolean | Promise<boolean>
+  filterEntry?: (childRelPath: string) => boolean | Promise<boolean>,
+  /** Rewrite file content before any mode or section handling (the public
+   * tier's term redaction), so a section slice can never contain what the
+   * full page would not. */
+  transform?: (content: string) => string
 ): Promise<CallToolResult> {
   await ensureFresh();
   if (mode === "frontmatter" && section !== undefined) {
@@ -140,7 +148,8 @@ async function getPage(
       ],
     };
   }
-  const content = await readRepoFile(relPath);
+  let content = await readRepoFile(relPath);
+  if (transform) content = transform(content);
   if (mode === "frontmatter") {
     // Textual extraction: gray-matter's `.matter` property is dropped from
     // its parse cache, so it is unreliable once search has parsed the page.
@@ -554,16 +563,33 @@ function buildPublicServer(): McpServer {
     allow: config.publicAllow.length > 0 ? config.publicAllow : DEFAULT_PUBLIC_ALLOW,
     deny: [...DEFAULT_PUBLIC_DENY, ...config.publicDeny],
   };
+  const terms = compileTerms(config.publicRedact);
   const inScope = (p: string) => publicWikiPath(p, scope) !== null;
   // Listings show readable children plus the directories on the way down to
   // something readable, so a narrow allowlist is still navigable.
   const listable = (p: string) => inScope(p) || publicAncestorPath(p, scope) !== null;
+  /** A page named for a blocked term (in its path, title, or description) is
+   * served as if it did not exist; null means exactly that. Otherwise the
+   * content with every mention removed. */
+  const servable = (p: string, content: string): string | null => {
+    if (mentions(p, terms)) return null;
+    return redactPage(content, terms);
+  };
   // Listing entries are checked where they resolve, not just by name, so a
-  // symlink whose read would be refused is not named either.
+  // symlink whose read would be refused is not named either; and a file the
+  // term filter would refuse is not named.
   const listableEntry = async (p: string) => {
     if (!listable(p)) return false;
     const real = await realRelPath(p);
-    return real !== null && listable(real);
+    if (real === null || !listable(real)) return false;
+    if (terms === null || (await statRepoPath(real)) !== "file") return true;
+    let content: string;
+    try {
+      content = await readRepoFile(real);
+    } catch {
+      return false;
+    }
+    return servable(p, content) !== null;
   };
   // Whitespace (incl. newlines) folds to single spaces: these lines are the
   // query log, and caller-supplied text must not be able to forge entries.
@@ -609,7 +635,21 @@ function buildPublicServer(): McpServer {
     },
     async ({ query, limit }) => {
       log(`query_wiki "${query}"`);
-      const hits = await queryWiki(query, limit ?? 8, "concise", (p) => !inScope(p), "wiki");
+      const hits = await queryWiki(query, limit ?? 8, "concise", (p) => !inScope(p), "wiki", (doc) => {
+        if (terms === null) return doc;
+        if (
+          mentions(doc.path, terms) ||
+          mentions(doc.title, terms) ||
+          mentions(doc.description, terms)
+        ) {
+          return null;
+        }
+        return {
+          ...doc,
+          tags: doc.tags.filter((t) => !mentions(t, terms)),
+          body: redactBody(doc.body, terms),
+        };
+      });
       return { content: [{ type: "text", text: formatHits(query, hits) }] };
     }
   );
@@ -646,8 +686,14 @@ function buildPublicServer(): McpServer {
       // out-of-scope path does, so the two are indistinguishable.
       if (kind === "missing") return notFound(relPath);
       if (readable === null && kind !== "dir") return notFound(relPath);
+      let served: string | undefined;
+      if (kind === "file" && terms !== null) {
+        const page = servable(norm, await readRepoFile(norm));
+        if (page === null) return notFound(relPath);
+        served = page;
+      }
       log(`get_page ${norm}${section ? ` § ${section}` : ""}`);
-      return getPage(norm, undefined, section, listableEntry);
+      return getPage(norm, undefined, section, listableEntry, served === undefined ? undefined : () => served);
     }
   );
 

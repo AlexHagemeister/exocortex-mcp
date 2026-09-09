@@ -65,6 +65,10 @@ function pathList(name: string, why: string): string[] {
 const guestDeny = pathList("EXOCORTEX_GUEST_DENY", "guests can only reach wiki/");
 const publicAllow = pathList("EXOCORTEX_PUBLIC_ALLOW", "the public can only reach wiki/");
 const publicDeny = pathList("EXOCORTEX_PUBLIC_DENY", "the public can only reach wiki/");
+const publicRedact = (process.env.EXOCORTEX_PUBLIC_REDACT ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 export const config = {
   mirrorRepoUrl: required("MIRROR_REPO_URL"),
@@ -78,6 +82,8 @@ export const config = {
   publicAllow,
   /** Extra public-denied entries (normalized), on top of the defaults. */
   publicDeny,
+  /** Terms redacted from everything the public tier serves. */
+  publicRedact,
   port: Number(process.env.PORT ?? 3000),
   dataDir: path.resolve(process.env.DATA_DIR ?? "./data"),
   syncIntervalMs: Number(process.env.SYNC_INTERVAL_SECONDS ?? 300) * 1000,

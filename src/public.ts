@@ -123,3 +123,121 @@ export function publicTokenProblem(
   }
   return null;
 }
+
+/**
+ * Term redaction: the second layer under the path scope. A denied topic can
+ * still be mentioned in passing on an allowed page, and the model can only
+ * say what it reads, so the mention is removed before it is served rather
+ * than caught in the model's output afterwards.
+ */
+
+/** A compiled blocked-term matcher, or null when no terms are configured. */
+export type TermMatcher = RegExp | null;
+
+/**
+ * Compile operator-supplied terms into one case-insensitive matcher that
+ * fires on whole words only: "trep" must not match inside "entrepreneur".
+ * Internal whitespace in a term matches any run of whitespace.
+ */
+export function compileTerms(terms: string[]): TermMatcher {
+  const parts = terms
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .map((t) =>
+      t
+        .split(/\s+/)
+        .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("\\s+")
+    );
+  if (parts.length === 0) return null;
+  return new RegExp(`(?<![\\p{L}\\p{N}])(?:${parts.join("|")})(?![\\p{L}\\p{N}])`, "iu");
+}
+
+export function mentions(text: string, matcher: TermMatcher): boolean {
+  return matcher !== null && matcher.test(text);
+}
+
+const FENCE = /^(```|~~~)/;
+const HEADING = /^(#{1,6})\s/;
+/** Lines that stand alone inside a block: list items, table rows, quotes. */
+const LINE_ITEM = /^\s*(?:[-*+]\s|\d+[.)]\s|\||>)/;
+
+/**
+ * Remove every block of a markdown body that mentions a blocked term, and
+ * nothing else. A titled section (heading through the next heading of the
+ * same or higher level) goes when its heading mentions a term; a fenced code
+ * block goes whole; a list, table, or quote loses only the offending lines;
+ * any other paragraph goes whole. Nothing marks the removal.
+ */
+export function redactBody(body: string, matcher: TermMatcher): string {
+  if (matcher === null || !matcher.test(body)) return body;
+  const lines = body.split("\n");
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // A titled section: drop through the next heading at its level or above.
+    const h = HEADING.exec(line);
+    if (h && matcher.test(line)) {
+      const level = h[1].length;
+      i++;
+      while (i < lines.length) {
+        const nh = HEADING.exec(lines[i]);
+        if (nh && nh[1].length <= level) break;
+        i++;
+      }
+      continue;
+    }
+    // A fenced block: whole or nothing.
+    if (FENCE.test(line)) {
+      const fence = [line];
+      i++;
+      while (i < lines.length) {
+        fence.push(lines[i]);
+        i++;
+        if (FENCE.test(fence[fence.length - 1])) break;
+      }
+      if (!fence.some((l) => matcher.test(l))) out.push(...fence);
+      continue;
+    }
+    // Blank lines pass through; blocks are the runs between them.
+    if (line.trim() === "") {
+      out.push(line);
+      i++;
+      continue;
+    }
+    const block: string[] = [];
+    while (i < lines.length && lines[i].trim() !== "" && !FENCE.test(lines[i])) {
+      if (block.length > 0 && HEADING.test(lines[i])) break;
+      block.push(lines[i]);
+      i++;
+      if (HEADING.test(block[0])) break;
+    }
+    if (block.every((l) => LINE_ITEM.test(l))) {
+      out.push(...block.filter((l) => !matcher.test(l)));
+    } else if (!block.some((l) => matcher.test(l))) {
+      out.push(...block);
+    }
+  }
+  // Collapse the triple blank lines that removals leave behind.
+  return out.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
+/**
+ * Redact a whole page file: frontmatter lines that mention a term are
+ * dropped, the body goes through redactBody. Returns null when the page's
+ * title or description mentions a term: a page named for a blocked topic is
+ * about it, and is served as if it did not exist.
+ */
+export function redactPage(content: string, matcher: TermMatcher): string | null {
+  if (matcher === null || !matcher.test(content)) return content;
+  const m = /^(---\r?\n)([\s\S]*?)(\r?\n---(?:\r?\n|$))/.exec(content);
+  if (!m) return redactBody(content, matcher);
+  const fmLines = m[2].split(/\r?\n/);
+  for (const l of fmLines) {
+    if (/^(title|description)\s*:/i.test(l) && matcher.test(l)) return null;
+  }
+  const fm = fmLines.filter((l) => !matcher.test(l)).join("\n");
+  const body = content.slice(m[0].length);
+  return m[1] + fm + m[3] + redactBody(body, matcher);
+}

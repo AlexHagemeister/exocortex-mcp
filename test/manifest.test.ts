@@ -21,6 +21,7 @@ process.env.EXOCORTEX_GUEST_TOKEN = "guest-token-of-sufficient-length";
 process.env.EXOCORTEX_PUBLIC_TOKEN = "public-token-of-sufficient-length";
 process.env.EXOCORTEX_OWNER_NAME = "Alex";
 process.env.EXOCORTEX_PUBLIC_DENY = "wiki/life/health/";
+process.env.EXOCORTEX_PUBLIC_REDACT = "pangolin, big stick";
 
 function write(rel: string, body: string) {
   const abs = path.join(fixture, rel);
@@ -31,7 +32,16 @@ const page = (title: string, body: string) =>
   `---\ntitle: "${title}"\ndescription: "${title} page"\nstatus: draft\n---\n# ${title}\n\n${body}\n`;
 
 before(() => {
-  write("wiki/projects/kairoscope.md", page("Kairoscope", "A public project about pelicans."));
+  write(
+    "wiki/projects/kairoscope.md",
+    page(
+      "Kairoscope",
+      "A public project about pelicans.\n\nFunded by Pangolin Corp, quietly.\n\n" +
+        "- pelican item\n- big stick item\n\n## Pangolin era\n\nHidden history.\n\n## Aftermath\n\nStill pelicans."
+    )
+  );
+  write("wiki/projects/pangolin-deal.md", page("The deal", "Named for it in the path; pelicans."));
+  write("wiki/projects/shindig.md", page("Big Stick Shindig", "Named for it in the title; pelicans."));
   write("wiki/life/pursuit.md", page("Pursuit", "What Alex is after: pelicans too."));
   write("wiki/life/health/back.md", page("Back", "Private health detail: zebrafish."));
   write("wiki/people/anna.md", page("Anna", "A friend. Likes zebrafish."));
@@ -127,6 +137,20 @@ test("public: in-scope reads and filtered listings", async () => {
   const kairo = await text(c, "get_page", { path: "wiki/projects/kairoscope.md" });
   assert.equal(kairo.isError, false);
   assert.match(kairo.text, /pelicans/);
+  assert.doesNotMatch(kairo.text, /pangolin|big stick|Hidden history/i);
+  assert.match(kairo.text, /pelican item/);
+  assert.match(kairo.text, /Still pelicans/);
+  const after = await text(c, "get_page", { path: "wiki/projects/kairoscope.md", section: "Aftermath" });
+  assert.match(after.text, /Still pelicans/);
+  const era = await text(c, "get_page", { path: "wiki/projects/kairoscope.md", section: "Pangolin era" });
+  assert.equal(era.isError, true);
+  for (const p of ["wiki/projects/pangolin-deal.md", "wiki/projects/shindig.md"]) {
+    const r = await text(c, "get_page", { path: p });
+    assert.equal(r.isError, true, p);
+    assert.equal(r.text, `Not found: ${p}`);
+  }
+  const projects = await text(c, "get_page", { path: "wiki/projects" });
+  assert.deepEqual(projects.text.split("\n").slice(1), ["kairoscope.md"]);
   const sect = await text(c, "get_page", { path: "wiki/life/pursuit.md", section: "Pursuit" });
   assert.match(sect.text, /pelicans too/);
   const root = await text(c, "get_page", { path: "wiki" });
@@ -146,6 +170,15 @@ test("public: search never surfaces denied or non-wiki content", async () => {
   assert.match(shown.text, /wiki\/projects\/kairoscope\.md/);
   assert.match(shown.text, /wiki\/life\/pursuit\.md/);
   assert.doesNotMatch(shown.text, /people|health|log\/|chronicle|notes\/|sources\//);
+  // pages named for a term never appear, even when they match the query
+  assert.doesNotMatch(shown.text, /pangolin-deal|shindig/);
+  // a term cannot be searched for, and cannot reach a snippet or full body
+  const term = await text(c, "query_wiki", { query: "pangolin" });
+  assert.equal(term.text, 'No wiki pages matched "pangolin".');
+  const stick = await text(c, "query_wiki", { query: "big stick" });
+  assert.equal(stick.text, 'No wiki pages matched "big stick".');
+  const quiet = await text(c, "query_wiki", { query: "quietly funded" });
+  assert.doesNotMatch(quiet.text, /pangolin/i);
   await c.close();
 });
 
@@ -156,6 +189,11 @@ test("guest and owner tiers are untouched by the public deny list", async () => 
   assert.match(anna.text, /zebrafish/);
   const health = await text(g, "get_page", { from: "Test", path: "wiki/life/health/back.md" });
   assert.equal(health.isError, false);
+  // the term list is public-only
+  const kairo = await text(g, "get_page", { from: "Test", path: "wiki/projects/kairoscope.md" });
+  assert.match(kairo.text, /Pangolin Corp/);
+  const found = await text(g, "query_wiki", { from: "Test", query: "pangolin" });
+  assert.match(found.text, /kairoscope|pangolin-deal/);
   const log = await text(g, "get_page", { from: "Test", path: "wiki/log/2026-09-01.md" });
   assert.equal(log.isError, true);
   await g.close();
