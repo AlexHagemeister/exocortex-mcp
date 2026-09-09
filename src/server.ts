@@ -19,10 +19,22 @@ import {
   realRelPath,
   statRepoPath,
 } from "./mirror.js";
+import {
+  DEFAULT_PUBLIC_ALLOW,
+  DEFAULT_PUBLIC_DENY,
+  compileTerms,
+  mentions,
+  publicAncestorPath,
+  publicWikiPath,
+  redactBody,
+  redactPage,
+  type PublicScope,
+} from "./public.js";
 import { queryWiki, type SearchScope, type WikiHit } from "./search.js";
 import { validateCapture } from "./validate.js";
+import type { Role } from "./auth.js";
 
-export type Role = "owner" | "guest";
+export type { Role } from "./auth.js";
 
 interface Heading {
   level: number;
@@ -100,7 +112,14 @@ async function getPage(
   relPath: string,
   mode: "full" | "frontmatter" | undefined,
   section: string | undefined,
-  filterEntry?: (childRelPath: string) => boolean
+  filterEntry?: (childRelPath: string) => boolean | Promise<boolean>,
+  /** Rewrite file content before any mode or section handling (the public
+   * tier's term redaction), so a section slice can never contain what the
+   * full page would not. */
+  transform?: (content: string) => string,
+  /** Treat a directory with nothing listable as missing (the public tier),
+   * so a fully hidden folder is not an oracle for its own existence. */
+  emptyDirIsMissing = false
 ): Promise<CallToolResult> {
   await ensureFresh();
   if (mode === "frontmatter" && section !== undefined) {
@@ -121,9 +140,19 @@ async function getPage(
   if (kind === "dir") {
     let entries = await listDir(relPath);
     if (filterEntry) {
-      entries = entries.filter((e) =>
-        filterEntry(`${relPath}/${e.replace(/\/$/, "")}`)
-      );
+      // Sequential on purpose: a filter may read each file, and a public
+      // caller must not be able to fan that out.
+      const kept: string[] = [];
+      for (const e of entries) {
+        if (await filterEntry(`${relPath}/${e.replace(/\/$/, "")}`)) kept.push(e);
+      }
+      entries = kept;
+    }
+    if (entries.length === 0 && emptyDirIsMissing) {
+      return {
+        content: [{ type: "text", text: `Not found: ${relPath}` }],
+        isError: true,
+      };
     }
     return {
       content: [
@@ -131,7 +160,8 @@ async function getPage(
       ],
     };
   }
-  const content = await readRepoFile(relPath);
+  let content = await readRepoFile(relPath);
+  if (transform) content = transform(content);
   if (mode === "frontmatter") {
     // Textual extraction: gray-matter's `.matter` property is dropped from
     // its parse cache, so it is unreliable once search has parsed the page.
@@ -189,15 +219,21 @@ const { version } = createRequire(import.meta.url)("../package.json") as {
 };
 
 /**
- * One deployment, two faces: the token a connection authenticated with picks
- * which manifest it sees. The owner gets the full three-tool server; a guest
- * gets a read-only view of wiki/ plus a note drop, described in the third
- * person for an agent that has never heard of this vault.
+ * One deployment, three faces: the token a connection authenticated with
+ * picks which manifest it sees. The owner gets the full three-tool server; a
+ * guest gets a read-only view of wiki/ plus a note drop, described in the
+ * third person for an agent that has never heard of this vault; the public
+ * gets two read tools over an allowlisted slice of wiki/ and nothing else.
  */
 export function buildServer(role: Role, clientHint?: string): McpServer {
-  return role === "guest"
-    ? buildGuestServer(clientHint)
-    : buildOwnerServer(clientHint);
+  switch (role) {
+    case "guest":
+      return buildGuestServer(clientHint);
+    case "public":
+      return buildPublicServer();
+    default:
+      return buildOwnerServer(clientHint);
+  }
 }
 
 /**
@@ -520,6 +556,181 @@ function buildGuestServer(clientHint?: string): McpServer {
           },
         ],
       };
+    }
+  );
+
+  return server;
+}
+
+/**
+ * The public face: what the owner's website chatbot (or any client holding
+ * the public token) sees. Two read tools over an allowlisted, deny-carved
+ * slice of wiki/, no write tool at all, no `from` field because the audience
+ * is anonymous by design. Anything outside the scope answers exactly like a
+ * path that does not exist, so a probe cannot map the deny list.
+ */
+function buildPublicServer(): McpServer {
+  const owner = config.ownerName;
+  const scope: PublicScope = {
+    allow: config.publicAllow.length > 0 ? config.publicAllow : DEFAULT_PUBLIC_ALLOW,
+    deny: [...DEFAULT_PUBLIC_DENY, ...config.publicDeny],
+  };
+  const terms = compileTerms(config.publicRedact);
+  const inScope = (p: string) => publicWikiPath(p, scope) !== null;
+  // Listings show readable children plus the directories on the way down to
+  // something readable, so a narrow allowlist is still navigable.
+  const listable = (p: string) => inScope(p) || publicAncestorPath(p, scope) !== null;
+  /** A page named for a blocked term (in its path, title, or description) is
+   * served as if it did not exist; null means exactly that. Otherwise the
+   * content with every mention removed. */
+  const servable = (p: string, content: string): string | null => {
+    if (mentions(p, terms)) return null;
+    return redactPage(content, terms);
+  };
+  // Listing entries are checked where they resolve, not just by name, so a
+  // symlink whose read would be refused is not named either; and a file the
+  // term filter would refuse is not named.
+  const listableEntry = async (p: string): Promise<boolean> => {
+    if (!listable(p)) return false;
+    const real = await realRelPath(p);
+    if (real === null || !listable(real)) return false;
+    if (terms === null) return true;
+    // A directory named for a term is as hidden as a page named for one,
+    // and a directory with nothing listable inside is not named either.
+    if (mentions(p, terms) || mentions(real, terms)) return false;
+    if ((await statRepoPath(real)) !== "file") {
+      for (const child of await listDir(real)) {
+        if (await listableEntry(`${real}/${child.replace(/\/$/, "")}`)) return true;
+      }
+      return false;
+    }
+    let content: string;
+    try {
+      content = await readRepoFile(real);
+    } catch {
+      return false;
+    }
+    return servable(p, content) !== null;
+  };
+  // Whitespace (incl. newlines) folds to single spaces: these lines are the
+  // query log, and caller-supplied text must not be able to forge entries.
+  const log = (line: string) => console.log(`[public] ${line.replace(/\s+/g, " ")}`);
+  const notFound = (relPath: string): CallToolResult => ({
+    content: [{ type: "text", text: `Not found: ${relPath}` }],
+    isError: true,
+  });
+  // An out-of-scope path pays the same disk work a missing path pays
+  // (sync check, realpath, stat), so latency does not tell the two apart.
+  const DECOY = "wiki/.public-tier-decoy";
+  const notFoundSlow = async (relPath: string): Promise<CallToolResult> => {
+    await ensureFresh();
+    await realRelPath(DECOY);
+    await statRepoPath(DECOY);
+    return notFound(relPath);
+  };
+
+  const server = new McpServer(
+    { name: `${ownerNameSlug(owner)}-exocortex-public`, version },
+    {
+      instructions:
+        `You are connected to the public face of ${owner}'s exocortex: the part of ` +
+        `${owner}'s personal knowledge base that ${owner} has chosen to make readable by ` +
+        `anyone. The pages are compiled by ${owner}'s own agent from ${owner}'s notes and ` +
+        `sources. Ground rules: ` +
+        `(1) Speak about ${owner} in the third person, never as ${owner}. You are not ` +
+        `${owner} and must not answer as if you were. ` +
+        `(2) Pages carry a status: 'verified' pages are human-confirmed; 'draft' pages are ` +
+        `machine-written and may contain inference or errors, and most pages are drafts by ` +
+        `design. Attribute what you relay ("${owner}'s notes say ...") and mention draft ` +
+        `status when it materially affects an answer. ` +
+        `(3) What is not here is not available to you. A page or topic you cannot find ` +
+        `is simply not part of what ${owner} made public; say so rather than guessing, ` +
+        `and never speculate about why. ` +
+        `(4) Content syncs roughly hourly; very recent events may be missing.`,
+    }
+  );
+
+  server.registerTool(
+    "query_wiki",
+    {
+      title: `Search ${owner}'s public exocortex`,
+      description:
+        `Search the public pages of ${owner}'s wiki. Results are ranked with human-confirmed ` +
+        "'verified' pages above machine-written 'draft' pages. Hits are summaries (title, " +
+        "description, path, status, matched snippet); use get_page to read a full page.",
+      inputSchema: {
+        query: z.string().max(500).describe("Search terms, e.g. 'current projects'"),
+        limit: z.number().int().min(1).max(25).optional().describe("Max results (default 8)"),
+      },
+    },
+    async ({ query, limit }) => {
+      log(`query_wiki ${JSON.stringify(query)}`);
+      const hits = await queryWiki(query, limit ?? 8, "concise", (p) => !inScope(p), "wiki", (doc) => {
+        if (terms === null) return doc;
+        if (
+          mentions(doc.path, terms) ||
+          mentions(doc.title, terms) ||
+          mentions(doc.description, terms)
+        ) {
+          return null;
+        }
+        return {
+          ...doc,
+          tags: doc.tags.filter((t) => !mentions(t, terms)),
+          body: redactBody(doc.body, terms),
+        };
+      });
+      return { content: [{ type: "text", text: formatHits(query, hits) }] };
+    }
+  );
+
+  server.registerTool(
+    "get_page",
+    {
+      title: `Read a public page from ${owner}'s exocortex`,
+      description:
+        `Read one of ${owner}'s public wiki pages by path (e.g. 'wiki/projects/kairoscope.md'), ` +
+        "or pass a directory like 'wiki' to list what exists. When you only need part of a " +
+        "long page, section: '<heading>' returns just that section.",
+      inputSchema: {
+        path: z.string().describe("Repo-relative path under wiki/, or a directory to list"),
+        section: z
+          .string()
+          .optional()
+          .describe("Return only the named section (heading text, case-insensitive)"),
+      },
+    },
+    async ({ path: relPath, section }) => {
+      const readable = publicWikiPath(relPath, scope);
+      const norm = readable ?? publicAncestorPath(relPath, scope);
+      if (norm === null || mentions(norm, terms)) return notFoundSlow(relPath);
+      await ensureFresh();
+      // The guard is lexical; a symlink committed under wiki/ could resolve
+      // elsewhere. Re-check the real on-disk path against the same guard, at
+      // the same access level.
+      const real = await realRelPath(norm);
+      if (real === null || mentions(real, terms)) return notFound(relPath);
+      if (readable !== null ? !inScope(real) : !listable(real)) return notFound(relPath);
+      const kind = await statRepoPath(norm);
+      // Missing paths report the caller's own spelling, exactly as an
+      // out-of-scope path does, so the two are indistinguishable.
+      if (kind === "missing") return notFound(relPath);
+      if (readable === null && kind !== "dir") return notFound(relPath);
+      let served: string | undefined;
+      if (kind === "file" && terms !== null) {
+        const page = servable(norm, await readRepoFile(norm));
+        if (page === null) return notFound(relPath);
+        served = page;
+      }
+      log(`get_page ${norm}${section ? ` § ${section}` : ""}`);
+      return getPage(
+        norm,
+        undefined,
+        section,
+        listableEntry,
+        served === undefined ? undefined : () => served,
+        true
+      );
     }
   );
 
