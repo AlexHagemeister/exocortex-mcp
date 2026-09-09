@@ -19,10 +19,18 @@ import {
   realRelPath,
   statRepoPath,
 } from "./mirror.js";
+import {
+  DEFAULT_PUBLIC_ALLOW,
+  DEFAULT_PUBLIC_DENY,
+  publicAncestorPath,
+  publicWikiPath,
+  type PublicScope,
+} from "./public.js";
 import { queryWiki, type SearchScope, type WikiHit } from "./search.js";
 import { validateCapture } from "./validate.js";
+import type { Role } from "./auth.js";
 
-export type Role = "owner" | "guest";
+export type { Role } from "./auth.js";
 
 interface Heading {
   level: number;
@@ -100,7 +108,7 @@ async function getPage(
   relPath: string,
   mode: "full" | "frontmatter" | undefined,
   section: string | undefined,
-  filterEntry?: (childRelPath: string) => boolean
+  filterEntry?: (childRelPath: string) => boolean | Promise<boolean>
 ): Promise<CallToolResult> {
   await ensureFresh();
   if (mode === "frontmatter" && section !== undefined) {
@@ -121,9 +129,10 @@ async function getPage(
   if (kind === "dir") {
     let entries = await listDir(relPath);
     if (filterEntry) {
-      entries = entries.filter((e) =>
-        filterEntry(`${relPath}/${e.replace(/\/$/, "")}`)
+      const keep = await Promise.all(
+        entries.map((e) => filterEntry(`${relPath}/${e.replace(/\/$/, "")}`))
       );
+      entries = entries.filter((_, i) => keep[i]);
     }
     return {
       content: [
@@ -189,15 +198,21 @@ const { version } = createRequire(import.meta.url)("../package.json") as {
 };
 
 /**
- * One deployment, two faces: the token a connection authenticated with picks
- * which manifest it sees. The owner gets the full three-tool server; a guest
- * gets a read-only view of wiki/ plus a note drop, described in the third
- * person for an agent that has never heard of this vault.
+ * One deployment, three faces: the token a connection authenticated with
+ * picks which manifest it sees. The owner gets the full three-tool server; a
+ * guest gets a read-only view of wiki/ plus a note drop, described in the
+ * third person for an agent that has never heard of this vault; the public
+ * gets two read tools over an allowlisted slice of wiki/ and nothing else.
  */
 export function buildServer(role: Role, clientHint?: string): McpServer {
-  return role === "guest"
-    ? buildGuestServer(clientHint)
-    : buildOwnerServer(clientHint);
+  switch (role) {
+    case "guest":
+      return buildGuestServer(clientHint);
+    case "public":
+      return buildPublicServer();
+    default:
+      return buildOwnerServer(clientHint);
+  }
 }
 
 /**
@@ -520,6 +535,119 @@ function buildGuestServer(clientHint?: string): McpServer {
           },
         ],
       };
+    }
+  );
+
+  return server;
+}
+
+/**
+ * The public face: what the owner's website chatbot (or any client holding
+ * the public token) sees. Two read tools over an allowlisted, deny-carved
+ * slice of wiki/, no write tool at all, no `from` field because the audience
+ * is anonymous by design. Anything outside the scope answers exactly like a
+ * path that does not exist, so a probe cannot map the deny list.
+ */
+function buildPublicServer(): McpServer {
+  const owner = config.ownerName;
+  const scope: PublicScope = {
+    allow: config.publicAllow.length > 0 ? config.publicAllow : DEFAULT_PUBLIC_ALLOW,
+    deny: [...DEFAULT_PUBLIC_DENY, ...config.publicDeny],
+  };
+  const inScope = (p: string) => publicWikiPath(p, scope) !== null;
+  // Listings show readable children plus the directories on the way down to
+  // something readable, so a narrow allowlist is still navigable.
+  const listable = (p: string) => inScope(p) || publicAncestorPath(p, scope) !== null;
+  // Listing entries are checked where they resolve, not just by name, so a
+  // symlink whose read would be refused is not named either.
+  const listableEntry = async (p: string) => {
+    if (!listable(p)) return false;
+    const real = await realRelPath(p);
+    return real !== null && listable(real);
+  };
+  // Whitespace (incl. newlines) folds to single spaces: these lines are the
+  // query log, and caller-supplied text must not be able to forge entries.
+  const log = (line: string) => console.log(`[public] ${line.replace(/\s+/g, " ")}`);
+  const notFound = (relPath: string): CallToolResult => ({
+    content: [{ type: "text", text: `Not found: ${relPath}` }],
+    isError: true,
+  });
+
+  const server = new McpServer(
+    { name: `${ownerNameSlug(owner)}-exocortex-public`, version },
+    {
+      instructions:
+        `You are connected to the public face of ${owner}'s exocortex: the part of ` +
+        `${owner}'s personal knowledge base that ${owner} has chosen to make readable by ` +
+        `anyone. The pages are compiled by ${owner}'s own agent from ${owner}'s notes and ` +
+        `sources. Ground rules: ` +
+        `(1) Speak about ${owner} in the third person, never as ${owner}. You are not ` +
+        `${owner} and must not answer as if you were. ` +
+        `(2) Pages carry a status: 'verified' pages are human-confirmed; 'draft' pages are ` +
+        `machine-written and may contain inference or errors, and most pages are drafts by ` +
+        `design. Attribute what you relay ("${owner}'s notes say ...") and mention draft ` +
+        `status when it materially affects an answer. ` +
+        `(3) What is not here is not available to you. A page or topic you cannot find ` +
+        `is simply not part of what ${owner} made public; say so rather than guessing, ` +
+        `and never speculate about why. ` +
+        `(4) Content syncs roughly hourly; very recent events may be missing.`,
+    }
+  );
+
+  server.registerTool(
+    "query_wiki",
+    {
+      title: `Search ${owner}'s public exocortex`,
+      description:
+        `Search the public pages of ${owner}'s wiki. Results are ranked with human-confirmed ` +
+        "'verified' pages above machine-written 'draft' pages. Hits are summaries (title, " +
+        "description, path, status, matched snippet); use get_page to read a full page.",
+      inputSchema: {
+        query: z.string().describe("Search terms, e.g. 'current projects'"),
+        limit: z.number().int().min(1).max(25).optional().describe("Max results (default 8)"),
+      },
+    },
+    async ({ query, limit }) => {
+      log(`query_wiki "${query}"`);
+      const hits = await queryWiki(query, limit ?? 8, "concise", (p) => !inScope(p), "wiki");
+      return { content: [{ type: "text", text: formatHits(query, hits) }] };
+    }
+  );
+
+  server.registerTool(
+    "get_page",
+    {
+      title: `Read a public page from ${owner}'s exocortex`,
+      description:
+        `Read one of ${owner}'s public wiki pages by path (e.g. 'wiki/projects/kairoscope.md'), ` +
+        "or pass a directory like 'wiki' to list what exists. When you only need part of a " +
+        "long page, section: '<heading>' returns just that section.",
+      inputSchema: {
+        path: z.string().describe("Repo-relative path under wiki/, or a directory to list"),
+        section: z
+          .string()
+          .optional()
+          .describe("Return only the named section (heading text, case-insensitive)"),
+      },
+    },
+    async ({ path: relPath, section }) => {
+      const readable = publicWikiPath(relPath, scope);
+      const norm = readable ?? publicAncestorPath(relPath, scope);
+      if (norm === null) return notFound(relPath);
+      await ensureFresh();
+      // The guard is lexical; a symlink committed under wiki/ could resolve
+      // elsewhere. Re-check the real on-disk path against the same guard, at
+      // the same access level.
+      const real = await realRelPath(norm);
+      if (real === null) return notFound(relPath);
+      if (readable !== null ? !inScope(real) : !listable(real)) return notFound(relPath);
+      const kind = await statRepoPath(norm);
+      // Missing paths report the caller's own spelling, exactly as an
+      // out-of-scope path does, so the two are indistinguishable.
+      if (kind === "missing") return notFound(relPath);
+      if (readable === null && kind !== "dir") return notFound(relPath);
+      log(`get_page ${norm}${section ? ` § ${section}` : ""}`);
+      return getPage(norm, undefined, section, listableEntry);
     }
   );
 

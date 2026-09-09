@@ -1,11 +1,11 @@
-import crypto from "node:crypto";
 import express, { type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { config } from "./config.js";
 import { deepHealth } from "./health.js";
 import { ensureFresh } from "./mirror.js";
 import { redact } from "./redact.js";
-import { buildServer, type Role } from "./server.js";
+import { matchToken, type Role } from "./auth.js";
+import { buildServer } from "./server.js";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -28,12 +28,6 @@ app.get("/healthz/deep", (_req, res) => {
     );
 });
 
-function timingSafeEqual(a: string, b: string): boolean {
-  const ha = crypto.createHash("sha256").update(a).digest();
-  const hb = crypto.createHash("sha256").update(b).digest();
-  return crypto.timingSafeEqual(ha, hb);
-}
-
 type AuthMethod = "bearer" | "path";
 
 interface Auth {
@@ -41,23 +35,14 @@ interface Auth {
   method: AuthMethod;
 }
 
-/** Match a presented token against the owner secret, then the guest secret. */
-function matchToken(presented: string): Role | null {
-  if (timingSafeEqual(presented, config.token)) return "owner";
-  if (config.guestToken && timingSafeEqual(presented, config.guestToken)) {
-    return "guest";
-  }
-  return null;
-}
-
 function authorized(req: Request, pathToken?: string): Auth | null {
   const header = req.headers.authorization;
   if (header?.startsWith("Bearer ")) {
-    const role = matchToken(header.slice(7));
+    const role = matchToken(header.slice(7), config);
     if (role) return { role, method: "bearer" };
   }
   if (pathToken) {
-    const role = matchToken(pathToken);
+    const role = matchToken(pathToken, config);
     if (role) return { role, method: "path" };
   }
   return null;
@@ -83,7 +68,7 @@ async function handleMcp(req: Request, res: Response, pathToken?: string) {
   const ua = req.get("user-agent");
   const clientHint =
     (auth.method === "path" ? "claude.ai connector" : "bearer-auth client") +
-    (auth.role === "guest" ? ", guest tier" : "") +
+    (auth.role === "owner" ? "" : `, ${auth.role} tier`) +
     (ua ? `, ${ua}` : "");
   const server = buildServer(auth.role, clientHint);
   const transport = new StreamableHTTPServerTransport({

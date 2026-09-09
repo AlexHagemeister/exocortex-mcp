@@ -75,6 +75,20 @@ Optionally, the same deployment can serve a second audience: trusted people you 
 
 Enable it by setting `EXOCORTEX_GUEST_TOKEN` (a second `openssl rand -hex 32` — the server refuses to boot if it equals `EXOCORTEX_TOKEN`, since that would silently make every guest an owner) and `EXOCORTEX_OWNER_NAME` (e.g. `Alex`). Then hand each trusted person `https://<host>/t/<guest-token>/mcp` to paste into **Settings → Connectors → Add custom connector**. The URL is the credential: everyone holding it is "a trusted friend" to the server, and rotating the env var revokes them all. If you ever want per-person revocation or real (non-self-reported) attribution, that's the moment to mint per-person tokens — or graduate to OAuth.
 
+## Public access
+
+A third face, for an audience you do not know: a token you embed **server-side** on your own website (a chatbot that answers questions about you, say), never in a browser. Same server, same mechanism as the guest tier (the token picks the manifest), with the opposite trust posture:
+
+- Server name `<owner>-exocortex-public`, with instructions for a client talking to strangers: speak about you in the third person and never as you, weight `verified` over `draft`, and treat anything it cannot find as simply not public, with no guessing about why.
+- `query_wiki` and `get_page` only. There is no write tool of any kind, no `from` field, and no note drop: the public is anonymous by design, and abuse control (rate limits, bot checks) belongs to the site that holds the token, not to this server.
+- Scope is **allowlist-first**: a path is readable only when it sits under an entry of `EXOCORTEX_PUBLIC_ALLOW` (default `wiki/`) and under no entry of `EXOCORTEX_PUBLIC_DENY`, on top of the built-in denials of `wiki/log/` and `wiki/log.md`, `wiki/chronicle/`, `wiki/connections/`, and `wiki/people/`. Deny always wins, so `EXOCORTEX_PUBLIC_ALLOW=wiki/life/` with `EXOCORTEX_PUBLIC_DENY=wiki/life/health/` does what it reads like. Entries are comma-separated folder prefixes, or single files when they end in `.md`. Changing the scope is an env change and a restart, no code.
+- Anything outside the scope answers `Not found: <path>`, byte for byte what a nonexistent path returns, so a probe cannot map the deny list. Search never surfaces excluded pages, directory listings omit them, the checks are case-folded, traversal and dot segments are refused, and symlinks are checked where they resolve (both for reads and before a name appears in a listing).
+- Each call is logged (`[public] query_wiki "..."`), so your host's logs are the query log. Nothing identifies the visitor.
+
+Enable it with `EXOCORTEX_PUBLIC_TOKEN` (a third `openssl rand -hex 32`; the server refuses to boot if it equals either other token or is too short) and `EXOCORTEX_OWNER_NAME`. The owner and guest tiers are unchanged whether or not it is set. Hand your server-side client `https://<host>/mcp` with `Authorization: Bearer <public-token>` (the AI SDK's `createMCPClient` with an `http` transport takes exactly that). The `/t/<token>/mcp` form works too, but a URL that is a credential has no business in a public site's config.
+
+Two things this tier deliberately does not do, and where they live instead: it does not filter *inside* allowed pages (a page about your projects may still mention a person or a topic you denied by path; the calling site's system prompt and its own tests own that seam), and it does not rate-limit (the site's edge does).
+
 ## Deploy your own (Railway, ~10 minutes)
 
 Any Node host works; Railway is what the reference deployment uses.
